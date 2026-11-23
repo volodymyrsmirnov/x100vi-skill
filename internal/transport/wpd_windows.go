@@ -2,13 +2,12 @@
 
 package transport
 
-// Windows: PTP through Windows Portable Devices, the way FUJIFILM X RAW STUDIO for Windows talks to the
-// camera. Windows binds PTP cameras to its own MTP/PTP driver; raw PTP requests go through
+// Windows: PTP through Windows Portable Devices, Windows' native camera interface. Windows binds PTP cameras to its own MTP/PTP driver; raw PTP requests go through
 // IPortableDevice::SendCommand with the MTP vendor-extension commands, so no extra driver (WinUSB, Zadig)
 // is needed and Explorer keeps working. The driver owns the PTP session.
 //
-// The property keys are the ones Fujifilm's FTLPTP.dll (WPD build) uses: commands 12-17 and properties
-// 1001-1013 of WPD_CATEGORY_MTP_EXT_VENDOR_OPERATIONS.
+// The commands are WPD's documented MTP vendor-extension commands: commands 12-17 and properties 1001-1013 of
+// WPD_CATEGORY_MTP_EXT_VENDOR_OPERATIONS (PortableDevice.h).
 //
 // COM is called through the interfaces' vtables (no cgo). All COM work runs on one OS thread owned by the
 // transport, initialised for the multithreaded apartment, so callers may use any goroutine.
@@ -78,6 +77,7 @@ const (
 	pContext         = 1006
 	pTotalSize       = 1007
 	pBytesToRead     = 1008
+	pBytesRead       = 1009
 	pBytesToWrite    = 1010
 	pBytesWritten    = 1011
 	pData            = 1012
@@ -93,7 +93,6 @@ const (
 	securityImpersonation = 0x00020000
 	genericReadWrite      = 0x80000000 | 0x40000000
 	vtUI4                 = 19
-	defaultChunk          = 256 * 1024
 
 	clsctxInprocServer  = 1
 	coinitMultithreaded = 0
@@ -533,9 +532,9 @@ func (t *wpdTransport) Transact(op uint16, params []uint32, dataOut []byte) (uin
 		var err error
 		switch {
 		case dataOut != nil:
-			code, err = t.write(op, params, dataOut, what)
+			code, err = wpdWrite(t, what, op, params, dataOut)
 		case dataInOps[op]:
-			code, data, err = t.read(op, params, what)
+			code, data, err = wpdRead(t, what, op, params)
 		default:
 			var results *values
 			results, err = t.sendNew(what, func() (*values, error) { return newOpCommand(cmdWithoutData, op, params) })
@@ -560,139 +559,136 @@ func (t *wpdTransport) responseCode(results *values, what string) (uint16, error
 	return uint16(code), nil
 }
 
-// chunk is the transfer size the driver suggests, or 256 KiB.
+// chunkSize is the transfer size the driver suggests, or 0 for none.
 func chunkSize(results *values) uint32 {
-	if size, err := results.getUint32(mtpKey(pOptimalBuffer)); err == nil && size > 0 {
+	if size, err := results.getUint32(mtpKey(pOptimalBuffer)); err == nil {
 		return size
 	}
-	return defaultChunk
+	return 0
 }
 
-// start sends the command that opens a data transfer and returns its context and suggested chunk size.
-func (t *wpdTransport) start(params *values, what string) (start *values, context string, chunk uint32, err error) {
-	start, err = t.send(params, what)
+// begin sends the command that opens a data transfer and returns its results and context. The caller
+// releases the results.
+func (t *wpdTransport) begin(params *values, what string) (*values, string, error) {
+	results, err := t.send(params, what)
 	if err != nil {
-		return nil, "", 0, err
+		return nil, "", err
 	}
-	if context, err = start.getString(mtpKey(pContext)); err != nil {
-		start.release()
-		return nil, "", 0, notResponding(what, err)
+	ctx, err := results.getString(mtpKey(pContext))
+	if err != nil {
+		results.release()
+		return nil, "", notResponding(what, err)
 	}
-	return start, context, chunkSize(start), nil
+	return results, ctx, nil
 }
 
-func (t *wpdTransport) read(op uint16, params []uint32, what string) (uint16, []byte, error) {
+// The methods below implement wpdTransfers (wpd_transfer.go), which runs the data-phase loops.
+var _ wpdTransfers = (*wpdTransport)(nil)
+
+func (t *wpdTransport) startRead(what string, op uint16, params []uint32) (string, uint32, uint64, error) {
 	cmd, err := newOpCommand(cmdDataToRead, op, params)
 	if err != nil {
-		return 0, nil, notResponding(what, err)
+		return "", 0, 0, notResponding(what, err)
 	}
-	start, context, chunk, err := t.start(cmd, what)
-	cmd.release()
+	defer cmd.release()
+	results, ctx, err := t.begin(cmd, what)
 	if err != nil {
-		return 0, nil, err
+		return "", 0, 0, err
 	}
-	total, err := start.getUint64(mtpKey(pTotalSize))
-	start.release()
+	defer results.release()
+	total, err := results.getUint64(mtpKey(pTotalSize))
 	if err != nil {
-		return 0, nil, notResponding(what, err)
+		return ctx, 0, 0, notResponding(what, err) // the context is open: the caller ends it
 	}
-	var data []byte
-	if total < 1<<31 {
-		data = make([]byte, 0, total)
-	}
-	for uint64(len(data)) < total {
-		want := uint32(min(uint64(chunk), total-uint64(len(data))))
-		results, err := t.sendNew(what, func() (*values, error) {
-			v, err := newCommand(cmdRead)
-			if err != nil {
-				return nil, err
-			}
-			if err = v.setString(mtpKey(pContext), context); err == nil {
-				if err = v.setUint32(mtpKey(pBytesToRead), want); err == nil {
-					err = v.setBuffer(mtpKey(pData), make([]byte, want))
-				}
-			}
-			if err != nil {
-				v.release()
-				return nil, err
-			}
-			return v, nil
-		})
-		if err != nil {
-			return 0, nil, err
-		}
-		part, err := results.getBuffer(mtpKey(pData))
-		results.release()
-		if err != nil {
-			return 0, nil, notResponding(what, err)
-		}
-		if len(part) == 0 {
-			break
-		}
-		data = append(data, part...)
-	}
-	code, err := t.end(context, what)
-	return code, data, err
+	return ctx, chunkSize(results), total, nil
 }
 
-func (t *wpdTransport) write(op uint16, params []uint32, data []byte, what string) (uint16, error) {
+func (t *wpdTransport) readChunk(what, ctx string, want uint32) ([]byte, int, error) {
+	results, err := t.sendNew(what, func() (*values, error) {
+		v, err := newCommand(cmdRead)
+		if err != nil {
+			return nil, err
+		}
+		if err = v.setString(mtpKey(pContext), ctx); err == nil {
+			if err = v.setUint32(mtpKey(pBytesToRead), want); err == nil {
+				err = v.setBuffer(mtpKey(pData), make([]byte, want))
+			}
+		}
+		if err != nil {
+			v.release()
+			return nil, err
+		}
+		return v, nil
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	defer results.release()
+	buf, err := results.getBuffer(mtpKey(pData))
+	if err != nil {
+		return nil, 0, notResponding(what, err)
+	}
+	n := -1
+	if got, err := results.getUint32(mtpKey(pBytesRead)); err == nil {
+		n = int(got)
+	}
+	return buf, n, nil
+}
+
+func (t *wpdTransport) startWrite(what string, op uint16, params []uint32, total uint64) (string, uint32, error) {
 	cmd, err := newOpCommand(cmdDataToWrite, op, params)
 	if err == nil {
-		if err = cmd.setUint64(mtpKey(pTotalSize), uint64(len(data))); err != nil {
+		if err = cmd.setUint64(mtpKey(pTotalSize), total); err != nil {
 			cmd.release()
 		}
 	}
 	if err != nil {
-		return 0, notResponding(what, err)
+		return "", 0, notResponding(what, err)
 	}
-	start, context, chunk, err := t.start(cmd, what)
-	cmd.release()
+	defer cmd.release()
+	results, ctx, err := t.begin(cmd, what)
+	if err != nil {
+		return "", 0, err
+	}
+	defer results.release()
+	return ctx, chunkSize(results), nil
+}
+
+func (t *wpdTransport) writeChunk(what, ctx string, piece []byte) (uint32, error) {
+	results, err := t.sendNew(what, func() (*values, error) {
+		v, err := newCommand(cmdWrite)
+		if err != nil {
+			return nil, err
+		}
+		if err = v.setString(mtpKey(pContext), ctx); err == nil {
+			if err = v.setUint32(mtpKey(pBytesToWrite), uint32(len(piece))); err == nil {
+				err = v.setBuffer(mtpKey(pData), piece)
+			}
+		}
+		if err != nil {
+			v.release()
+			return nil, err
+		}
+		return v, nil
+	})
 	if err != nil {
 		return 0, err
 	}
-	start.release()
-	for pos := 0; pos < len(data); {
-		piece := data[pos:min(pos+int(chunk), len(data))]
-		results, err := t.sendNew(what, func() (*values, error) {
-			v, err := newCommand(cmdWrite)
-			if err != nil {
-				return nil, err
-			}
-			if err = v.setString(mtpKey(pContext), context); err == nil {
-				if err = v.setUint32(mtpKey(pBytesToWrite), uint32(len(piece))); err == nil {
-					err = v.setBuffer(mtpKey(pData), piece)
-				}
-			}
-			if err != nil {
-				v.release()
-				return nil, err
-			}
-			return v, nil
-		})
-		if err != nil {
-			return 0, err
-		}
-		written, err := results.getUint32(mtpKey(pBytesWritten))
-		results.release()
-		if err != nil {
-			return 0, notResponding(what, err)
-		}
-		if written == 0 || int(written) > len(piece) {
-			return 0, errs.NotRespondingErr(fmt.Sprintf("Windows accepted %d of %d bytes during %s (%d of %d sent so far)",
-				written, len(piece), what, pos, len(data)))
-		}
-		pos += int(written) // a short write is resent from where it stopped
+	defer results.release()
+	written, err := results.getUint32(mtpKey(pBytesWritten))
+	if err != nil {
+		return 0, notResponding(what, err)
 	}
-	return t.end(context, what)
+	return written, nil
 }
 
-func (t *wpdTransport) end(context, what string) (uint16, error) {
+func (t *wpdTransport) endTransfer(what, ctx string) (uint16, error) {
 	results, err := t.sendNew(what, func() (*values, error) {
 		v, err := newCommand(cmdEnd)
 		if err != nil {
 			return nil, err
 		}
-		if err = v.setString(mtpKey(pContext), context); err != nil {
+		if err = v.setString(mtpKey(pContext), ctx); err != nil {
 			v.release()
 			return nil, err
 		}

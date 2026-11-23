@@ -27,7 +27,7 @@ const (
 	Magic        = "FUJIFILMX-BACKUP"
 	ObjectFormat = 0x5000
 	Handle       = 0
-	InfoSize     = 1076 // the ObjectInfo length Fujifilm's SDK sends when restoring
+	InfoSize     = 1076 // the ObjectInfo length sent when restoring (measured to work on the X100VI)
 	HeaderSize   = 0x48
 	Suffix       = ".dat"
 )
@@ -123,7 +123,7 @@ func Read(s *ptp.Session) ([]byte, error) {
 	return blob, nil
 }
 
-// Write sends a settings file to the camera, exactly as Fujifilm's SDK does.
+// Write sends a settings file back to the camera.
 func Write(s *ptp.Session, blob []byte) error {
 	info := make([]byte, InfoSize)
 	binary.LittleEndian.PutUint16(info[4:], ObjectFormat)

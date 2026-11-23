@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/volodymyrsmirnov/x100vi-skill/main/src/x100vi/recipe.schema.json",
+  "$schema": "https://raw.githubusercontent.com/volodymyrsmirnov/x100vi-skill/main/assets/recipe.schema.json",
   "source": "x100vi-skill starter recipe (original; not an emulation of any film stock)",
   "name": "DESERT GOLD",
   "description": "Warm, sun-baked sand under a deep blue sky. For deserts, beaches and dry landscapes in daylight.",

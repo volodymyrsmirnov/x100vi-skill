@@ -12,8 +12,10 @@ on:
 permissions:
   contents: read
 
+# A newer push to a pull request cancels the run it supersedes. Every push to main gets a group of its
+# own (keyed by its commit), so no push to main is ever cancelled or dropped as a pending duplicate.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -116,9 +118,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: 0.2.${{ github.run_number }}
         run: |
+          # Only the newest commit on main may become "latest": with several pushes in flight, an older run
+          # that finishes last must not take "latest" away from a newer release.
+          head=$(gh api "repos/${{ github.repository }}/commits/main" --jq .sha)
+          latest=false
+          if [ "$head" = "${{ github.sha }}" ]; then latest=true; fi
           gh release create "v$VERSION" dist/* \
             --repo "${{ github.repository }}" \
             --target "${{ github.sha }}" \
             --title "x100vi $VERSION" \
             --generate-notes \
-            --latest
+            --latest="$latest"

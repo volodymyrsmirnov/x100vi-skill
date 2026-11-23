@@ -469,3 +469,41 @@ func TestClearWBMemoryZeroesEveryMode(t *testing.T) {
 		t.Fatal("d_range_priority")
 	}
 }
+
+// The owner shoots RAW at medium size; naming a never-named register seeds it from the live settings,
+// so the register briefly holds RAW + medium. Restoring image size first is refused while quality is
+// RAW: the second pass must put it back once quality is restored.
+func TestSeedingABlankRegisterFromRawLiveSettingsIsUndone(t *testing.T) {
+	cam, fake := setup(t)
+	fake.Live["image_quality"] = model.ImageQuality.Codes["raw"]
+	fake.Live["image_size"] = model.ImageSize.Codes["m_3:2"]
+	mustWrite(t, cam, recipe(t, `{"name": "STREET", "film_simulation": "acros"}`), slot(5), false)
+	if !fake.NamedBefore[5] {
+		t.Fatal("the register was not named, so the quirk was not exercised")
+	}
+	if fake.SlotValue(5, "image_quality") != "fine" || fake.SlotValue(5, "image_size") != "l_3:2" {
+		t.Fatal(fake.SlotValue(5, "image_quality"), fake.SlotValue(5, "image_size"))
+	}
+	if fake.SlotValue(5, "dynamic_range") != "100" || fake.SlotValue(5, "film_simulation") != "acros" {
+		t.Fatal(fake.SlotValue(5, "dynamic_range"), fake.SlotValue(5, "film_simulation"))
+	}
+}
+
+func TestASideEffectTheCameraWillNotUndoIsReportedByName(t *testing.T) {
+	cam, fake := setup(t)
+	fake.Live["image_quality"] = model.ImageQuality.Codes["raw"]
+	fake.Live["image_size"] = model.ImageSize.Codes["m_3:2"]
+	fake.FieldHook = func(state map[string]int, f model.Field, target fakecam.Target, wire int, next func() uint16) uint16 {
+		if f.Key == "image_size" && !target.Live {
+			return 0x201C // never accepts a size for the register
+		}
+		return next()
+	}
+	_, err := cam.Write(recipe(t, `{"name": "STREET", "film_simulation": "acros"}`), slot(5), false)
+	e := wantKind(t, err, errs.InvalidRecipe)
+	want := "the camera did not put back every setting the recipe left alone: " +
+		"image_size (0xD18E) was 0x0007, camera holds 0x0004"
+	if e.Message != want || !strings.Contains(e.Hint, "x100vi get C5") {
+		t.Fatalf("%q / %q", e.Message, e.Hint)
+	}
+}

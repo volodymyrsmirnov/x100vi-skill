@@ -4,6 +4,8 @@ package errs
 import (
 	"errors"
 	"fmt"
+
+	"github.com/volodymyrsmirnov/x100vi-skill/internal/omap"
 )
 
 const (
@@ -44,11 +46,11 @@ type Error struct {
 func (e *Error) Error() string { return e.Message }
 func (e *Error) Unwrap() error { return e.cause }
 
-// AsMap is the --json form of the error.
-func (e *Error) AsMap() map[string]any {
-	out := map[string]any{"error": e.Kind.Name, "message": e.Message}
+// AsMap is the --json form of the error, keys in the order error, message, hint (hint only when set).
+func (e *Error) AsMap() *omap.Map {
+	out := omap.New().Set("error", e.Kind.Name).Set("message", e.Message)
 	if e.Hint != "" {
-		out["hint"] = e.Hint
+		out.Set("hint", e.Hint)
 	}
 	return out
 }

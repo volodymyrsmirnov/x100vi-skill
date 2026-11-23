@@ -24,6 +24,8 @@ X100VI_HARDWARE=1 X100VI_TEST_RAF=/path/to/shot.RAF go test ./internal/hardware 
   GetObjectInfo, which hung a camera).
 - `internal/transport` - the only code that touches hardware: ImageCaptureCore on macOS (cgo), Windows
   Portable Devices on Windows (COM), usbfs on Linux.
+- `internal/camlock` - the cross-process lock every camera command holds, so two commands never interleave
+  register selection.
 - `internal/sandbox` - agent-sandbox detection and the Codex rules / Claude Code settings `sandbox-help`
   prints.
 - `internal/cli`, `cmd/x100vi` - commands; text for people, `--json` for agents.

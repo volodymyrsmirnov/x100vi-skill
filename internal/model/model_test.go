@@ -174,6 +174,14 @@ func TestRejectsWhatTheCameraCannotHold(t *testing.T) {
 		{`{"monochromatic": {"warm_cool": 3}}`, "monochrome or acros"},
 		{`{"film_simulation": "monochrome", "color": 2}`, "does not apply"},
 		{`{"image_quality": "raw", "image_size": "l_3:2"}`, "cannot be set while"},
+		{`{"image_quality": "RAW", "image_size": "l_3:2"}`, "cannot be set while"},
+		{`{"image_quality": "Raw", "image_size": "unknown:0x0004"}`, "cannot be set while"},
+		{`{"image_size": "unknown:0x10000"}`, "0xFFFF at most"},
+		{`{"film_simulation": "unknown:0xFFFFFFFF"}`, "0xFFFF at most"},
+		{`{"film_simulation": "unknown:0x-1"}`, "not a valid code"},
+		{`{"film_simulation": "unknown:0x"}`, "not a valid code"},
+		{`{"noise_reduction": "unknown:0x10000"}`, "0xFFFF at most"},
+		{`{"noise_reduction": "unknown:0x+1"}`, "not a valid code"},
 		{`{"name": "` + strings.Repeat("x", 26) + `"}`, "25"},
 		{`{"name": "CAFÉ"}`, "ASCII"},
 		{`{"grain": "strong"}`, "must be an object"},
@@ -276,6 +284,12 @@ func TestUnknownCodesRoundTrip(t *testing.T) {
 		t.Errorf("%v", v)
 	}
 	if code, err := EncodeField(f, "unknown:0x000B"); err != nil || code != 0x000B {
+		t.Errorf("%d %v", code, err)
+	}
+	if code, err := EncodeField(f, "UNKNOWN:0xFFFF"); err != nil || code != 0xFFFF {
+		t.Errorf("%d %v", code, err)
+	}
+	if code, err := EncodeField(ByKey["noise_reduction"], "unknown:0x9000"); err != nil || code != 0x9000 {
 		t.Errorf("%d %v", code, err)
 	}
 }

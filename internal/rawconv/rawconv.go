@@ -1,7 +1,8 @@
 // Package rawconv is in-camera RAW conversion: develop a RAF with a recipe on the X100VI's own
 // processor.
 //
-// This is the FUJIFILM X RAW STUDIO flow (camera in USB RAW CONV./BACKUP RESTORE mode):
+// The flow, with the camera in USB RAW CONV./BACKUP RESTORE mode (sequence as documented in
+// github.com/zgrimz/fujifilm-ptp-reference, confirmed on the X100VI):
 //
 //	SendObjectInfo 0x900C + SendObject2 0x900D   upload the RAF as FUP_FILE.dat (format 0xF802)
 //	GetDevicePropValue 0xD185                    profile describing the RAF's as-shot settings
@@ -9,8 +10,8 @@
 //	SetDevicePropValue 0xD183 = 0 | 1            develop: half size | full resolution
 //	GetObjectHandles / GetObject / DeleteObject  fetch the image and remove it from the buffer
 //
-// Profile cell 2 picks the output: JPEG 7, HEIF 18, TIFF 8-bit 9, TIFF 16-bit 11 (codes from X RAW
-// STUDIO's profile keywords). The body produces TIFF only at full resolution; at half size it returns a
+// Profile cell 2 picks the output: JPEG 7, HEIF 18, TIFF 8-bit 9, TIFF 16-bit 11 (each confirmed by
+// developing on the X100VI). The body produces TIFF only at full resolution; at half size it returns a
 // JPEG.
 //
 // Sequence and profile layout follow github.com/zgrimz/fujifilm-ptp-reference (docs 05, 06). The
@@ -43,7 +44,9 @@ const (
 	RAFMagic    = "FUJIFILMCCD-RAW "
 
 	Table     = 0x1FD // cell i lives at Table + 4*i, signed 32-bit little endian
-	HostCells = 30    // X RAW STUDIO always writes 30 cells (629 bytes) with numParams = 29
+	HostCells = 30    // the host-write form: 30 cells (629 bytes) with numParams = 29
+	// CameraCells is the fewest cells a profile the camera hands back may have.
+	CameraCells = 28
 
 	CFileType, CExposure, CDR, CDRP, CFilm, CWBSource = 2, 5, 6, 7, 8, 11
 	FileTypeJPEG                                      = 7
@@ -247,7 +250,7 @@ func (p *Profile) IOPCode() string {
 
 // Validate refuses to patch anything that does not look like a profile at the known base.
 func (p *Profile) Validate() error {
-	if len(p.Data) < Table+4*28 {
+	if len(p.Data) < Table+4*CameraCells {
 		return errs.New(errs.ConversionFailed, fmt.Sprintf("unexpected conversion profile (%d bytes)", len(p.Data)), "")
 	}
 	dr, film := p.Get(CDR), p.Get(CFilm)
@@ -260,7 +263,7 @@ func (p *Profile) Validate() error {
 	return nil
 }
 
-// HostForm is the form X RAW STUDIO writes: 30 cells, numParams 29, IOPCode length counting its NUL.
+// HostForm is the host-write form: 30 cells, numParams 29, IOPCode length counting its NUL.
 func (p *Profile) HostForm() ([]byte, error) {
 	want := Table + 4*HostCells
 	if len(p.Data) > want {
@@ -332,7 +335,7 @@ func (a Adjustment) String() string {
 // CheckExposure turns exposure compensation for a conversion into thirds of a stop (-2..+3 EV).
 func CheckExposure(exposureEV float64) (int, error) {
 	thirds := math.RoundToEven(exposureEV * 3)
-	if math.Abs(exposureEV*3-thirds) > 0.05 || thirds < -6 || thirds > 9 {
+	if math.IsNaN(exposureEV) || math.IsInf(exposureEV, 0) || math.Abs(exposureEV*3-thirds) > 0.05 || thirds < -6 || thirds > 9 {
 		return 0, errs.Recipe(fmt.Sprintf("exposure %s EV is not valid for a conversion", pyG(exposureEV)),
 			"Use steps of 1/3 EV from -2 to +3, e.g. 0.33, 0.67, 1, -0.33. The camera ignores "+
 				"anything outside -2..+3 when developing.")
@@ -454,6 +457,7 @@ type RawConverter struct {
 	Camera  *camera.Camera
 	Session *ptp.Session
 	AsShot  *Profile
+	stalled bool // a conversion timed out: the body may still be busy, so never trigger another
 }
 
 // NewRawConverter works through an open camera.
@@ -522,6 +526,11 @@ func (rc *RawConverter) Develop(profile *Profile, full bool, timeout time.Durati
 		return nil, errs.Recipe(format.Label+" output needs full resolution",
 			"The camera produces TIFF only at full size: add --full.")
 	}
+	if rc.stalled {
+		return nil, errs.New(errs.ConversionFailed, "an earlier conversion on this connection never finished",
+			"Switch the camera off and on (remove the battery briefly if it will not switch off), reconnect, "+
+				"then run the command again.")
+	}
 	prof := profile.Clone()
 	prof.Set(CFileType, format.FileType)
 	want, err := prof.HostForm()
@@ -536,6 +545,13 @@ func (rc *RawConverter) Develop(profile *Profile, full bool, timeout time.Durati
 		return nil, err
 	}
 	back, sent := NewProfile(stored), NewProfile(want)
+	if back.Validate() != nil || back.Cells() < CameraCells {
+		// An empty or foreign readback would pass the comparison below, which only covers the cells
+		// both forms have.
+		return nil, errs.New(errs.ConversionFailed,
+			fmt.Sprintf("the camera answered with unreadable conversion settings (%d bytes)", len(stored)),
+			"Nothing was developed. Power-cycle the camera and try again.")
+	}
 	var diff []int
 	for i := 0; i < min(back.Cells(), sent.Cells()); i++ {
 		if back.Get(i) != sent.Get(i) {
@@ -568,10 +584,16 @@ func (rc *RawConverter) Develop(profile *Profile, full bool, timeout time.Durati
 	for !found && time.Now().Before(deadline) {
 		code, _, data, err := rc.Session.Transact(ptp.OpGetObjectHandles, []uint32{0xFFFFFFFF, 0, 0}, nil)
 		if err != nil {
+			rc.stalled = true // the conversion may still be running
 			return nil, err
 		}
-		if code == ptp.RCOK {
-			for _, h := range ptp.NewReader(data).ArrayU32() {
+		if code == ptp.RCOK { // anything else: the body is still busy, ask again
+			now, err := ptp.ParseHandles(data)
+			if err != nil {
+				rc.stalled = true // the conversion may still be running
+				return nil, err
+			}
+			for _, h := range now {
 				if !before[h] {
 					handle, found = h, true
 					break
@@ -584,6 +606,7 @@ func (rc *RawConverter) Develop(profile *Profile, full bool, timeout time.Durati
 	}
 	if !found {
 		// Never trigger again after a timeout: the body may still be converting.
+		rc.stalled = true
 		return nil, errs.New(errs.ConversionFailed,
 			fmt.Sprintf("the camera produced no image within %s s", pyG(timeout.Seconds())),
 			"Do not retry yet. Switch the camera off and on (remove the battery briefly if it "+
@@ -593,9 +616,12 @@ func (rc *RawConverter) Develop(profile *Profile, full bool, timeout time.Durati
 	if err != nil {
 		return nil, err
 	}
-	r := ptp.NewReader(desc)
-	r.U32()
-	gotFormat, _, size := r.U16(), r.U16(), r.U32()
+	// The whole description must parse before the object is downloaded or deleted.
+	info, err := ptp.ParseObjectInfo(desc)
+	if err != nil {
+		return nil, err
+	}
+	gotFormat, size := info.Format, info.Size
 	image, gerr := rc.Session.Check(ptp.OpGetObject, []uint32{handle}, nil, "download the result")
 	// remove only the object this conversion produced
 	_, _, _, _ = rc.Session.Transact(ptp.OpDeleteObject, []uint32{handle}, nil)

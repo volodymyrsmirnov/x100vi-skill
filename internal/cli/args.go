@@ -27,6 +27,7 @@ type option struct {
 	metavar     string
 	choices     []string
 	hidden      bool
+	required    bool // the command cannot run without it (argparse's required=True)
 	def         any
 }
 
@@ -109,6 +110,7 @@ func (c *command) parse(tokens []string) (*Args, error) {
 		a.values[key(o)] = o.def
 	}
 	var loose []string
+	given := map[string]bool{}
 	onlyPositional := false
 	for i := 0; i < len(tokens); i++ {
 		tok := tokens[i]
@@ -124,6 +126,7 @@ func (c *command) parse(tokens []string) (*Args, error) {
 		if o == nil {
 			return nil, usageErr(c.name, "unrecognized option: %s", tok)
 		}
+		given[key(*o)] = true
 		switch o.kind {
 		case optBool:
 			if hasInline {
@@ -133,7 +136,7 @@ func (c *command) parse(tokens []string) (*Args, error) {
 		case optString, optFloat:
 			v := inline
 			if !hasInline {
-				if i+1 >= len(tokens) {
+				if i+1 >= len(tokens) || isOption(tokens[i+1]) {
 					return nil, usageErr(c.name, "%s needs a value", o.long)
 				}
 				i++
@@ -167,7 +170,8 @@ func (c *command) parse(tokens []string) (*Args, error) {
 		}
 	}
 	// Assign positionals in order; a "many" positional takes everything that is left except what
-	// later positionals need.
+	// later positionals need. Missing ones are reported together with missing required options.
+	var missing []string
 	for idx, p := range c.args {
 		need := 0
 		for _, later := range c.args[idx+1:] {
@@ -179,7 +183,8 @@ func (c *command) parse(tokens []string) (*Args, error) {
 		case p.many:
 			take := len(loose) - need
 			if take < 1 {
-				return nil, usageErr(c.name, "the following arguments are required: %s", p.display())
+				missing = append(missing, p.display())
+				continue
 			}
 			a.pos[p.name] = loose[:take]
 			loose = loose[take:]
@@ -192,11 +197,20 @@ func (c *command) parse(tokens []string) (*Args, error) {
 			}
 		default:
 			if len(loose) == 0 {
-				return nil, usageErr(c.name, "the following arguments are required: %s", p.display())
+				missing = append(missing, p.display())
+				continue
 			}
 			a.pos[p.name] = loose[:1]
 			loose = loose[1:]
 		}
+	}
+	for _, o := range c.options {
+		if o.required && !given[key(o)] {
+			missing = append(missing, o.display())
+		}
+	}
+	if len(missing) > 0 {
+		return nil, usageErr(c.name, "the following arguments are required: %s", strings.Join(missing, ", "))
 	}
 	if len(loose) > 0 {
 		return nil, usageErr(c.name, "unrecognized arguments: %s", strings.Join(loose, " "))
@@ -209,6 +223,14 @@ func (p positional) display() string {
 		return p.metavar
 	}
 	return p.name
+}
+
+// display is how argparse names an option in errors: -r/--recipe.
+func (o option) display() string {
+	if o.short != "" {
+		return o.short + "/" + o.long
+	}
+	return o.long
 }
 
 func contains(list []string, s string) bool {
@@ -244,6 +266,11 @@ func (o option) usage() string {
 func (c *command) helpText() string {
 	var b strings.Builder
 	line := "usage: x100vi " + c.name + " [options]"
+	for _, o := range c.options {
+		if o.required {
+			line += " " + strings.Replace(o.usage(), ", "+o.long, "", 1)
+		}
+	}
 	for _, p := range c.args {
 		switch {
 		case p.many:

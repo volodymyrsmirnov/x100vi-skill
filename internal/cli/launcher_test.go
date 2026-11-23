@@ -318,3 +318,27 @@ func TestLauncherUsesNoHereDocuments(t *testing.T) {
 		t.Error("x100vi.sh uses a here-document")
 	}
 }
+
+// The PowerShell launcher cannot run here, so its download is checked by reading it: every temporary
+// file is per process and removed in a finally block, and the binary still lands in the cache by a
+// forced move.
+func TestPowerShellLauncherDownloadsToPerProcessFiles(t *testing.T) {
+	body, err := os.ReadFile("../../skills/x100vi/scripts/x100vi.ps1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, want := range []string{"$PID", "NewGuid()", `$tmp = "$Tool.$id.download"`, `"SHA256SUMS.$id"`,
+		"} finally {", "Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath $tmp, $sums",
+		"Move-Item -Force $tmp $Tool"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("x100vi.ps1 lacks %q", want)
+		}
+	}
+	if strings.Contains(text, `"$Tool.download"`) || strings.Contains(text, `Join-Path $Cache "SHA256SUMS"`) {
+		t.Error("x100vi.ps1 still uses a shared temporary file")
+	}
+	if strings.Index(text, "Move-Item -Force $tmp $Tool") > strings.Index(text, "} finally {") {
+		t.Error("the move into the cache must happen inside the try block")
+	}
+}

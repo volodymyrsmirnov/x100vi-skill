@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -14,6 +15,7 @@ import (
 	"github.com/volodymyrsmirnov/x100vi-skill/internal/camera"
 	"github.com/volodymyrsmirnov/x100vi-skill/internal/errs"
 	"github.com/volodymyrsmirnov/x100vi-skill/internal/fakecam"
+	"github.com/volodymyrsmirnov/x100vi-skill/internal/ptp"
 	. "github.com/volodymyrsmirnov/x100vi-skill/internal/rawconv"
 )
 
@@ -496,5 +498,160 @@ func TestABodyThatIgnoresTheFileTypeIsReported(t *testing.T) {
 	}
 	if len(fake.Objects) != 0 {
 		t.Fatal(fake.Objects)
+	}
+}
+
+func TestExposureThatIsNotANumberIsRefused(t *testing.T) {
+	for _, ev := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		if _, err := CheckExposure(ev); err == nil {
+			t.Errorf("%v accepted", ev)
+		} else {
+			wantKind(t, err, errs.InvalidRecipe)
+		}
+		_, _, err := ApplyRecipe(asShot(t), map[string]any{}, ev, "")
+		wantKind(t, err, errs.InvalidRecipe)
+	}
+}
+
+func triggers(fake *fakecam.FakeX100VI) int {
+	n := 0
+	for _, w := range fake.Writes {
+		if w.Code == PropTrigger {
+			n++
+		}
+	}
+	return n
+}
+
+// ops records every operation that reaches the fake, in order, and lets a test answer some itself.
+func ops(fake *fakecam.FakeX100VI, answer func(op uint16, params []uint32) (uint16, []byte, bool)) *[]uint16 {
+	seen := &[]uint16{}
+	fake.Intercept = func(op uint16, params []uint32, data []byte, next func() (uint16, []byte)) (uint16, []byte) {
+		*seen = append(*seen, op)
+		if answer != nil {
+			if code, d, ok := answer(op, params); ok {
+				return code, d
+			}
+		}
+		return next()
+	}
+	return seen
+}
+
+func count(seen []uint16, op uint16) int {
+	n := 0
+	for _, o := range seen {
+		if o == op {
+			n++
+		}
+	}
+	return n
+}
+
+func TestAfterATimeoutTheConverterNeverTriggersAgain(t *testing.T) {
+	conv, fake, raf := setup(t)
+	shot := upload(t, conv, raf)
+	fake.StallConversion = true
+	if _, err := conv.Develop(shot, false, 300*time.Millisecond, ""); err == nil {
+		t.Fatal("no timeout")
+	}
+	fake.StallConversion = false // even once the body would answer again
+	_, err := conv.Develop(shot, false, 0, "")
+	if e := wantKind(t, err, errs.ConversionFailed); !strings.Contains(e.Message, "never finished") {
+		t.Fatal(e.Message)
+	}
+	if n := triggers(fake); n != 1 {
+		t.Fatal(n)
+	}
+}
+
+func TestATruncatedObjectListWhilePollingIsAnError(t *testing.T) {
+	conv, fake, raf := setup(t)
+	shot := upload(t, conv, raf)
+	triggered := false
+	seen := ops(fake, func(op uint16, params []uint32) (uint16, []byte, bool) {
+		if op == ptp.OpGetObjectHandles && triggered {
+			return 0x2001, []byte{2, 0, 0, 0, 1, 0, 0, 0}, true // two handles announced, one sent
+		}
+		triggered = triggered || (op == ptp.OpSetDevicePropValue && params[0] == PropTrigger)
+		return 0, nil, false
+	})
+	_, err := conv.Develop(shot, false, 2*time.Second, "")
+	if err == nil || !strings.Contains(err.Error(), "truncated list") {
+		t.Fatal(err)
+	}
+	if count(*seen, ptp.OpGetObjectInfo)+count(*seen, ptp.OpGetObject)+count(*seen, ptp.OpDeleteObject) != 0 {
+		t.Fatal(*seen)
+	}
+	if _, err := conv.Develop(shot, false, 0, ""); err == nil || triggers(fake) != 1 {
+		t.Fatal("triggered again after an unknown outcome", err)
+	}
+}
+
+func TestABusyAnswerWhilePollingIsAskedAgain(t *testing.T) {
+	conv, fake, raf := setup(t)
+	shot := upload(t, conv, raf)
+	busy := 2
+	triggered := false
+	ops(fake, func(op uint16, params []uint32) (uint16, []byte, bool) {
+		if op == ptp.OpGetObjectHandles && triggered && busy > 0 {
+			busy--
+			return 0x2019, nil, true // DeviceBusy, no data
+		}
+		triggered = triggered || (op == ptp.OpSetDevicePropValue && params[0] == PropTrigger)
+		return 0, nil, false
+	})
+	saved := PollInterval
+	PollInterval = time.Millisecond
+	t.Cleanup(func() { PollInterval = saved })
+	if _, err := conv.Develop(shot, false, 0, ""); err != nil || busy != 0 {
+		t.Fatal(err, busy)
+	}
+}
+
+func TestATruncatedResultDescriptionStopsBeforeDownloadOrDelete(t *testing.T) {
+	conv, fake, raf := setup(t)
+	shot := upload(t, conv, raf)
+	seen := ops(fake, func(op uint16, params []uint32) (uint16, []byte, bool) {
+		if op == ptp.OpGetObjectInfo {
+			info := make([]byte, 52) // the fixed part, but none of the four strings
+			binary.LittleEndian.PutUint16(info[4:], 0x3801)
+			binary.LittleEndian.PutUint32(info[8:], 10)
+			return 0x2001, info, true
+		}
+		return 0, nil, false
+	})
+	_, err := conv.Develop(shot, false, 0, "")
+	if err == nil || !strings.Contains(err.Error(), "truncated object description") {
+		t.Fatal(err)
+	}
+	if count(*seen, ptp.OpGetObject) != 0 || count(*seen, ptp.OpDeleteObject) != 0 || len(fake.Objects) != 1 {
+		t.Fatal(*seen, fake.Objects)
+	}
+}
+
+func TestAnUnreadableProfileReadbackNeverTriggers(t *testing.T) {
+	for name, readback := range map[string][]byte{
+		"empty":   {},
+		"short":   fakecam.AsShotProfile[:Table+4*20],
+		"garbage": make([]byte, len(fakecam.AsShotProfile)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			conv, fake, raf := setup(t)
+			shot := upload(t, conv, raf)
+			ops(fake, func(op uint16, params []uint32) (uint16, []byte, bool) {
+				if op == ptp.OpGetDevicePropValue && params[0] == camera.ProfileProp {
+					return 0x2001, readback, true
+				}
+				return 0, nil, false
+			})
+			_, err := conv.Develop(shot, false, 0, "")
+			if e := wantKind(t, err, errs.ConversionFailed); !strings.Contains(e.Message, "unreadable conversion settings") {
+				t.Fatal(e.Message)
+			}
+			if n := triggers(fake); n != 0 {
+				t.Fatal(n)
+			}
+		})
 	}
 }

@@ -21,7 +21,14 @@ const (
 	usbReadSize     = 1 << 20 // bytes asked for per bulk IN transfer
 	usbChunkPackets = 2048    // a bulk OUT transfer is this many max-size packets (1 MiB at 512 bytes)
 	maxEmptyReads   = 16      // zero-length packets tolerated in a row while a container is expected
+
+	// maxStaleContainers is how many containers of earlier transactions are discarded before giving up.
+	// An interrupted transaction leaves at most a data container and a response behind.
+	maxStaleContainers = 4
 )
+
+// errStaleContainers is a camera that keeps answering other transactions than the current one.
+var errStaleContainers = errors.New("the camera is answering an earlier request")
 
 // linuxHint is what to check on Linux when the camera cannot be reached.
 const linuxHint = "On Linux, unmount the camera in the file manager (gvfs) and make sure your user may " +
@@ -86,10 +93,24 @@ func (f *usbFramer) transact(op uint16, params []uint32, dataOut []byte) (uint16
 		}
 	}
 	var dataIn []byte
+	stale := 0
 	for {
 		h, body, err := f.readContainer()
 		if err != nil {
 			return 0, nil, nil, err
+		}
+		// Some cameras answer the session requests with transaction id 0 (the id PTP gives OpenSession).
+		sessionZero := h.tid == 0 && (op == ptp.OpOpenSession || op == ptp.OpCloseSession)
+		if h.tid != f.tid && !sessionZero {
+			// Left over from an earlier transaction that was interrupted (a timeout, a killed process):
+			// it is not the answer to this one.
+			stale++
+			if stale > maxStaleContainers {
+				return 0, nil, nil, fmt.Errorf("%w: %d containers in a row belonged to other transactions "+
+					"(last: type %d, code 0x%04X, transaction %d; expected %d)",
+					errStaleContainers, stale, h.ctype, h.code, h.tid, f.tid)
+			}
+			continue
 		}
 		switch h.ctype {
 		case ptp.Data:

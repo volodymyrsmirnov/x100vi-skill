@@ -214,16 +214,36 @@ func NewSession(t Transport) *Session { return &Session{T: t, described: map[uin
 
 // Transact runs one transaction. It refuses to download an object before its description was read:
 // asking an X100VI for an object it has not described first (seen with handle 0, the settings file)
-// can hang the body until its battery is removed.
+// can hang the body until its battery is removed. A handle stops counting as described once it is
+// deleted or once reading its description fails.
 func (s *Session) Transact(op uint16, params []uint32, dataOut []byte) (uint16, []uint32, []byte, error) {
-	if op == OpGetObject && len(params) > 0 && !s.described[params[0]] {
-		return 0, nil, nil, errs.New(errs.General,
-			fmt.Sprintf("refusing to download object %d before reading its description", params[0]),
-			"This is a bug in the tool; please report it.")
+	switch op {
+	case OpGetObject:
+		if len(params) != 1 {
+			return 0, nil, nil, errs.New(errs.General,
+				fmt.Sprintf("refusing to download an object with %d parameters instead of one handle", len(params)),
+				"This is a bug in the tool; please report it.")
+		}
+		if !s.described[params[0]] {
+			return 0, nil, nil, errs.New(errs.General,
+				fmt.Sprintf("refusing to download object %d before reading its description", params[0]),
+				"This is a bug in the tool; please report it.")
+		}
+	case OpDeleteObject:
+		switch {
+		case len(params) == 0 || params[0] == 0xFFFFFFFF: // all objects
+			clear(s.described)
+		default:
+			delete(s.described, params[0])
+		}
 	}
 	code, rparams, data, err := s.T.Transact(op, params, dataOut)
-	if err == nil && op == OpGetObjectInfo && len(params) > 0 && code == RCOK {
-		s.described[params[0]] = true
+	if op == OpGetObjectInfo && len(params) > 0 {
+		if err == nil && code == RCOK {
+			s.described[params[0]] = true
+		} else {
+			delete(s.described, params[0])
+		}
 	}
 	return code, rparams, data, err
 }
@@ -297,7 +317,13 @@ func (s *Session) GetString(code uint16) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return NewReader(d).String(), nil
+	r := NewReader(d)
+	s2 := r.String()
+	if r.Err != nil {
+		return "", errs.New(errs.General, fmt.Sprintf("property 0x%04X: the camera sent a truncated text value", code),
+			"Run the command again; if it keeps happening, switch the camera off and on.")
+	}
+	return s2, nil
 }
 
 func (s *Session) SetRaw(code uint16, data []byte, what string) error {
@@ -315,5 +341,45 @@ func (s *Session) Handles() ([]uint32, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewReader(d).ArrayU32(), nil
+	return ParseHandles(d)
+}
+
+// ParseHandles decodes a GetObjectHandles dataset and refuses a truncated one.
+func ParseHandles(d []byte) ([]uint32, error) {
+	r := NewReader(d)
+	handles := r.ArrayU32()
+	if r.Err != nil {
+		return nil, errs.Wrap(errs.General, r.Err, "the camera sent a truncated list of objects",
+			"Run the command again; if it keeps happening, switch the camera off and on.")
+	}
+	return handles, nil
+}
+
+// ObjectInfo is a PTP ObjectInfo dataset.
+type ObjectInfo struct {
+	StorageID                              uint32
+	Format, Protection                     uint16
+	Size                                   uint32
+	ThumbFormat                            uint16
+	ThumbSize, ThumbWidth, ThumbHeight     uint32
+	Width, Height, BitDepth, Parent        uint32
+	AssociationType                        uint16
+	AssociationDesc, SequenceNumber        uint32
+	Filename, Captured, Modified, Keywords string
+}
+
+// ParseObjectInfo decodes a whole ObjectInfo dataset and refuses a truncated one.
+func ParseObjectInfo(d []byte) (ObjectInfo, error) {
+	r := NewReader(d)
+	var o ObjectInfo
+	o.StorageID, o.Format, o.Protection, o.Size = r.U32(), r.U16(), r.U16(), r.U32()
+	o.ThumbFormat, o.ThumbSize, o.ThumbWidth, o.ThumbHeight = r.U16(), r.U32(), r.U32(), r.U32()
+	o.Width, o.Height, o.BitDepth, o.Parent = r.U32(), r.U32(), r.U32(), r.U32()
+	o.AssociationType, o.AssociationDesc, o.SequenceNumber = r.U16(), r.U32(), r.U32()
+	o.Filename, o.Captured, o.Modified, o.Keywords = r.String(), r.String(), r.String(), r.String()
+	if r.Err != nil {
+		return ObjectInfo{}, errs.Wrap(errs.General, r.Err, "the camera sent a truncated object description",
+			"Run the command again; if it keeps happening, switch the camera off and on.")
+	}
+	return o, nil
 }

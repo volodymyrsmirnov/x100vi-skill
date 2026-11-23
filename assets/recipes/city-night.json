@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/volodymyrsmirnov/x100vi-skill/main/src/x100vi/recipe.schema.json",
+  "$schema": "https://raw.githubusercontent.com/volodymyrsmirnov/x100vi-skill/main/assets/recipe.schema.json",
   "source": "x100vi-skill starter recipe (original; not an emulation of any film stock)",
   "name": "CITY NIGHT",
   "description": "Cool, cinematic streets after dark: teal shadows, neon that holds its colour, visible grain.",

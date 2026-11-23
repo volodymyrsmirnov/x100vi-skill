@@ -2,7 +2,7 @@
 
 package transport
 
-// macOS: PTP through ImageCaptureCore, the way FUJIFILM X RAW STUDIO for macOS talks to the camera.
+// macOS: PTP through ImageCaptureCore, macOS' native camera interface.
 //
 // ptpcamerad owns every PTP camera and keeps the PTP session open. ICCameraDevice
 // requestSendPTPCommand:outData:completion: takes a complete PTP command container plus the raw bytes of
@@ -12,6 +12,8 @@ package transport
 // ImageCaptureCore delivers its callbacks through the main run loop, which the shim below spins while it
 // waits. So the transport must be used from the main goroutine: init locks it to the main OS thread, and
 // a call from any other thread fails with an error instead of waiting for callbacks that never come.
+// Every callback the shim waits for signals a run-loop source as soon as it has stored its result, so
+// the spin returns at once instead of at the end of its time slice.
 
 /*
 #cgo CFLAGS: -x objective-c -fobjc-arc
@@ -34,7 +36,10 @@ enum {
 	XI_REMOVED = 5,
 	XI_TIMEOUT = 6,
 	XI_ERROR = 7,
+	XI_CLOSE_TIMEOUT = 8,
 };
+
+static void x_wake(void);
 
 typedef struct {
 	void *data;
@@ -44,11 +49,22 @@ typedef struct {
 	char *message;
 } x_reply;
 
+// X100VIGoICCClose waits for one device's session to close.
+@interface X100VIGoICCClose : NSObject
+@property (atomic, strong) ICDevice *device;
+@property (atomic) BOOL done;
+@property (atomic, strong) NSError *error;
+@end
+
+@implementation X100VIGoICCClose
+@end
+
 @interface X100VIGoICCDelegate : NSObject <ICDeviceBrowserDelegate, ICCameraDeviceDelegate>
 @property (atomic, strong) NSMutableArray *devices;
 @property (atomic) BOOL opened;
 @property (atomic, strong) NSError *openError;
 @property (atomic) BOOL removed;
+@property (atomic, strong) X100VIGoICCClose *closing;
 @end
 
 @implementation X100VIGoICCDelegate
@@ -62,17 +78,30 @@ typedef struct {
 // ICDeviceBrowserDelegate
 - (void)deviceBrowser:(ICDeviceBrowser *)browser didAddDevice:(ICDevice *)device moreComing:(BOOL)more {
 	@synchronized (self) { [self.devices addObject:device]; }
+	x_wake();
 }
 - (void)deviceBrowser:(ICDeviceBrowser *)browser didRemoveDevice:(ICDevice *)device moreGoing:(BOOL)more {
 	@synchronized (self) { [self.devices removeObject:device]; }
+	x_wake();
 }
 // ICDeviceDelegate
 - (void)device:(ICDevice *)device didOpenSessionWithError:(NSError *)error {
 	self.openError = error;
 	self.opened = YES;
+	x_wake();
 }
-- (void)device:(ICDevice *)device didCloseSessionWithError:(NSError *)error {}
-- (void)didRemoveDevice:(ICDevice *)device { self.removed = YES; }
+- (void)device:(ICDevice *)device didCloseSessionWithError:(NSError *)error {
+	X100VIGoICCClose *closing = self.closing;
+	if (closing != nil && closing.device == device) {
+		closing.error = error;
+		closing.done = YES;
+	}
+	x_wake();
+}
+- (void)didRemoveDevice:(ICDevice *)device {
+	self.removed = YES;
+	x_wake();
+}
 // ICCameraDeviceDelegate (required methods; the content catalog is not used)
 - (void)cameraDevice:(ICCameraDevice *)camera didAddItems:(NSArray<ICCameraItem *> *)items {}
 - (void)cameraDevice:(ICCameraDevice *)camera didRemoveItems:(NSArray<ICCameraItem *> *)items {}
@@ -100,9 +129,26 @@ typedef struct {
 static ICDeviceBrowser *gBrowser;
 static X100VIGoICCDelegate *gDelegate;
 
+// gWake is a run-loop source on the main run loop that callbacks signal once they have stored a result,
+// created with the browser and kept for the life of the process. A signal is remembered until the run
+// loop next runs, so one that arrives (on any thread) between x_spin's check and its next run is not
+// lost, and one that arrives late, after a wait timed out, only makes a later wait look once more.
+static CFRunLoopSourceRef gWake;
+
+static void x_wake_perform(void *info) {}
+
+static void x_wake(void) {
+	CFRunLoopSourceRef source = gWake;
+	if (source != NULL) {
+		CFRunLoopSourceSignal(source);
+		CFRunLoopWakeUp(CFRunLoopGetMain());
+	}
+}
+
 static uint64_t x_now(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
 
-// x_spin runs the current thread's run loop until done() or the timeout.
+// x_spin runs the current thread's run loop until done() or the timeout. Each run returns as soon as a
+// source was handled (x_wake signals one), so done() is checked again right after a callback.
 static BOOL x_spin(BOOL (^done)(void), double timeout) {
 	uint64_t end = x_now() + (uint64_t)(timeout * 1e9);
 	while (!done()) {
@@ -110,7 +156,7 @@ static BOOL x_spin(BOOL (^done)(void), double timeout) {
 			return NO;
 		}
 		@autoreleasepool {
-			if (CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.02, false) == kCFRunLoopRunFinished) {
+			if (CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.02, true) == kCFRunLoopRunFinished) {
 				usleep(20000);
 			}
 		}
@@ -146,6 +192,10 @@ static int x_icc_open(double findTimeout, double openTimeout, uintptr_t *handle,
 			return XI_NOT_MAIN_THREAD;
 		}
 		if (gBrowser == nil) {
+			CFRunLoopSourceContext context = {0};
+			context.perform = x_wake_perform;
+			gWake = CFRunLoopSourceCreate(kCFAllocatorDefault, 0, &context);
+			CFRunLoopAddSource(CFRunLoopGetMain(), gWake, kCFRunLoopDefaultMode);
 			gDelegate = [[X100VIGoICCDelegate alloc] init];
 			gBrowser = [[ICDeviceBrowser alloc] init];
 			gBrowser.delegate = gDelegate;
@@ -209,6 +259,7 @@ static int x_icc_send(uintptr_t handle, const void *command, size_t commandLen, 
 			box.response = response;
 			box.error = error;
 			box.done = YES;
+			x_wake();
 		}];
 		if (!x_spin(^BOOL { return box.done; }, timeout)) {
 			return XI_TIMEOUT;
@@ -223,12 +274,30 @@ static int x_icc_send(uintptr_t handle, const void *command, size_t commandLen, 
 	}
 }
 
-// x_icc_close ends this app's session but keeps the browser.
-static void x_icc_close(uintptr_t handle) {
+// x_icc_close ends this app's session but keeps the browser. It waits for the device to confirm, until
+// the timeout or the device's removal, and reports an error the device gave in *message.
+static int x_icc_close(uintptr_t handle, double timeout, char **message) {
 	@autoreleasepool {
+		*message = NULL;
 		ICCameraDevice *camera = CFBridgingRelease((void *)handle);
+		if (!pthread_main_np()) {
+			[camera requestCloseSession]; // still asked for, but its confirmation cannot arrive here
+			return XI_NOT_MAIN_THREAD;
+		}
+		X100VIGoICCClose *closing = [[X100VIGoICCClose alloc] init];
+		closing.device = camera;
+		gDelegate.closing = closing;
 		[camera requestCloseSession];
-		x_spin(^BOOL { return NO; }, 0.2);
+		BOOL done = x_spin(^BOOL { return closing.done || gDelegate.removed; }, timeout);
+		gDelegate.closing = nil;
+		if (closing.error != nil) {
+			*message = x_strdup(closing.error.localizedDescription);
+			return XI_ERROR;
+		}
+		if (!done) {
+			return XI_CLOSE_TIMEOUT;
+		}
+		return XI_OK;
 	}
 }
 */
@@ -249,8 +318,9 @@ import (
 func init() { runtime.LockOSThread() }
 
 const (
-	iccFindTimeout = 6 * time.Second
-	iccOpenTimeout = 15 * time.Second
+	iccFindTimeout  = 6 * time.Second
+	iccOpenTimeout  = 15 * time.Second
+	iccCloseTimeout = 5 * time.Second
 )
 
 type iccTransport struct {
@@ -341,11 +411,31 @@ func (t *iccTransport) Transact(op uint16, params []uint32, dataOut []byte) (uin
 	return h.code, responseParams(containerBody(response, h.length)), data, nil
 }
 
-// Close ends this app's session with the camera; the device browser stays for the next Open.
+// Close ends this app's session with the camera; the device browser stays for the next Open. It waits
+// for macOS to confirm. The transport is closed whatever it returns: an error only reports that macOS
+// did not confirm cleanly, which is no reason to fail a command whose work is done.
 func (t *iccTransport) Close() error {
-	if t.handle != 0 {
-		C.x_icc_close(t.handle)
-		t.handle = 0
+	if t.handle == 0 {
+		return nil
 	}
-	return nil
+	var message *C.char
+	status := C.x_icc_close(t.handle, C.double(iccCloseTimeout.Seconds()), &message)
+	t.handle = 0
+	reason := ""
+	if message != nil {
+		reason = C.GoString(message)
+		C.free(unsafe.Pointer(message))
+	}
+	const hint = "Nothing needs doing now. If the next command cannot reach the camera, switch it off and on."
+	switch status {
+	case C.XI_OK:
+		return nil
+	case C.XI_NOT_MAIN_THREAD:
+		return errNotMainThread()
+	case C.XI_CLOSE_TIMEOUT:
+		return errs.New(errs.NotResponding,
+			fmt.Sprintf("macOS did not confirm closing the camera session within %g s", iccCloseTimeout.Seconds()), hint)
+	default: // XI_ERROR
+		return errs.New(errs.NotResponding, "macOS reported an error closing the camera session: "+reason, hint)
+	}
 }

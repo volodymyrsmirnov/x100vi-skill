@@ -17,6 +17,7 @@ import (
 
 	"github.com/volodymyrsmirnov/x100vi-skill/internal/camera"
 	"github.com/volodymyrsmirnov/x100vi-skill/internal/camera/settingsfile"
+	"github.com/volodymyrsmirnov/x100vi-skill/internal/camlock"
 	"github.com/volodymyrsmirnov/x100vi-skill/internal/errs"
 	"github.com/volodymyrsmirnov/x100vi-skill/internal/exifcheck"
 	"github.com/volodymyrsmirnov/x100vi-skill/internal/library"
@@ -68,7 +69,14 @@ type env struct {
 	factory Factory
 }
 
+// camera connects, runs fn and disconnects, holding the cross-process camera lock throughout so another
+// x100vi command cannot select a different register in the middle of this one.
 func (e *env) camera(fn func(*camera.Camera) error) error {
+	release, err := camlock.Acquire()
+	if err != nil {
+		return err
+	}
+	defer release()
 	t, err := e.factory()
 	if err != nil {
 		return err
@@ -125,6 +133,11 @@ func RecipeAdvice(recipe map[string]any) []string {
 // -- commands ------------------------------------------------------------------------------------
 
 func (e *env) doctor(a *Args) error {
+	release, err := camlock.Acquire()
+	if err != nil {
+		return e.notReady(err)
+	}
+	defer release()
 	t, err := e.factory()
 	if err != nil {
 		return e.notReady(err)
@@ -151,7 +164,7 @@ func (e *env) doctor(a *Args) error {
 			return err
 		}
 		for _, k := range []string{"error", "message", "hint"} {
-			if v, ok := p.AsMap()[k]; ok {
+			if v, ok := p.AsMap().Get(k); ok {
 				result.Set(k, v)
 			}
 		}
@@ -172,7 +185,7 @@ func (e *env) notReady(err error) error {
 	}
 	result := omap.New().Set("ready", false)
 	for _, k := range []string{"error", "message", "hint"} {
-		if v, ok := p.AsMap()[k]; ok {
+		if v, ok := p.AsMap().Get(k); ok {
 			result.Set(k, v)
 		}
 	}
@@ -193,15 +206,19 @@ func (q quiet) Error() string { return fmt.Sprintf("exit %d", q.code) }
 
 func (e *env) get(a *Args) error {
 	target := a.Pos("target")
-	var data any
-	err := e.camera(func(cam *camera.Camera) error {
-		if strings.ToLower(target) == "all" {
-			b, err := cam.Backup()
-			data = b
+	all := strings.ToLower(strings.TrimSpace(target)) == "all"
+	var slot *int
+	if !all { // a bad target fails before connecting
+		var err error
+		if slot, err = model.ParseTarget(target); err != nil {
 			return err
 		}
-		slot, err := model.ParseTarget(target)
-		if err != nil {
+	}
+	var data any
+	err := e.camera(func(cam *camera.Camera) error {
+		if all {
+			b, err := cam.Backup()
+			data = b
 			return err
 		}
 		r, err := cam.Read(slot)
@@ -476,11 +493,22 @@ func (e *env) restore(a *Args) error {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
+	seen := map[int]string{}
 	for _, k := range keys { // "1".."7" as `backup` writes them, or any target spelling ("C3")
 		slot, err := model.ParseTarget(k)
 		if err != nil {
 			return err
 		}
+		if slot == nil { // "live" is not a custom setting; live settings are under "live" (--live)
+			return errs.Recipe(fmt.Sprintf("every key under \"slots\" in %s must be a custom setting C1 to C7, not %s",
+				file, model.Quote(k)),
+				"Live settings belong under \"live\" at the top of the backup; restore them with --live.")
+		}
+		if other, dup := seen[*slot]; dup {
+			return errs.Recipe(fmt.Sprintf("%s lists %s twice (as %s and %s)", file, model.TargetLabel(slot), model.Quote(other), model.Quote(k)),
+				"Keep one entry per custom setting.")
+		}
+		seen[*slot] = k
 		recipe, ok := slots[k].(map[string]any)
 		if !ok {
 			return errs.Recipe(fmt.Sprintf("%s in %s is not a recipe", model.TargetLabel(slot), file), "")
@@ -556,7 +584,7 @@ func (e *env) validate(a *Args) error {
 			failed = true
 			r := omap.New().Set("file", path).Set("valid", false)
 			for _, k := range []string{"error", "message", "hint"} {
-				if v, ok := p.AsMap()[k]; ok {
+				if v, ok := p.AsMap().Get(k); ok {
 					r.Set(k, v)
 				}
 			}
@@ -618,20 +646,31 @@ func (e *env) preview(a *Args) error {
 			return errs.Recipe(ref+": d_range_priority auto cannot be previewed",
 				"Add --d-range-priority weak, strong or plus to preview a level; the recipe can still be saved to the camera with auto.")
 		}
-		label := strings.TrimSuffix(filepath.Base(ref), filepath.Ext(ref))
-		for taken := true; taken; {
-			taken = false
-			for _, r := range recipes {
-				if r.label == label {
-					label += "-2"
-					taken = true
-				}
-			}
-		}
-		recipes = append(recipes, named{label, recipe})
+		recipes = append(recipes, named{strings.TrimSuffix(filepath.Base(ref), filepath.Ext(ref)), recipe})
 	}
 	if len(recipes) == 0 && !a.Bool("as-shot") {
 		return errs.Recipe("nothing to render", "Give --recipe FILE [...] and/or --as-shot.")
+	}
+	// Every output path is fixed before connecting and unique for the whole batch: the as-shot render
+	// keeps "as-shot", and a recipe or RAF whose name is taken gets -2, -3, ... (compared without
+	// case, as macOS and Windows file systems do).
+	jobs := recipes
+	if a.Bool("as-shot") {
+		jobs = append([]named{{"as-shot", nil}}, recipes...)
+	}
+	labelsTaken := map[string]bool{}
+	for i := range jobs {
+		jobs[i].label = unique(jobs[i].label, labelsTaken)
+	}
+	outDir := a.Str("out")
+	stemsTaken, pathsTaken := map[string]bool{}, map[string]bool{}
+	paths := make([][]string, len(rafs))
+	for i, raf := range rafs {
+		stem := unique(strings.TrimSuffix(filepath.Base(raf.Path), filepath.Ext(raf.Path)), stemsTaken)
+		for _, job := range jobs {
+			name := unique(stem+"__"+job.label, pathsTaken)
+			paths[i] = append(paths[i], filepath.Join(outDir, name+"."+format.Extension))
+		}
 	}
 	ev := a.Float("ev")
 	if _, err := rawconv.CheckExposure(ev); err != nil { // fail before connecting
@@ -642,7 +681,6 @@ func (e *env) preview(a *Args) error {
 			return err
 		}
 	}
-	outDir := a.Str("out")
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return err
 	}
@@ -656,7 +694,7 @@ func (e *env) preview(a *Args) error {
 		}
 		warnings = cam.Info.Warnings
 		conv := rawconv.NewRawConverter(cam)
-		for _, raf := range rafs {
+		for i, raf := range rafs {
 			data, err := os.ReadFile(raf.Path)
 			if err != nil {
 				return err
@@ -675,12 +713,7 @@ func (e *env) preview(a *Args) error {
 			}
 			lines = append(lines, line)
 			var row []sheet.Cell
-			jobs := recipes
-			if a.Bool("as-shot") {
-				jobs = append([]named{{"as-shot", nil}}, recipes...)
-			}
-			stem := strings.TrimSuffix(filepath.Base(raf.Path), filepath.Ext(raf.Path))
-			for _, job := range jobs {
+			for j, job := range jobs {
 				profile := asShot.Clone()
 				var adjustments []rawconv.Adjustment
 				if job.recipe != nil {
@@ -692,7 +725,7 @@ func (e *env) preview(a *Args) error {
 				if err != nil {
 					return err
 				}
-				target := filepath.Join(outDir, fmt.Sprintf("%s__%s.%s", stem, job.label, format.Extension))
+				target := paths[i][j]
 				if err := os.WriteFile(target, image, 0o644); err != nil {
 					return err
 				}
@@ -775,6 +808,16 @@ func (e *env) preview(a *Args) error {
 	return e.out.Emit(omap.New().Set("renders", renders).Set("frames", frames).Set("contact_sheet", sheetPath).
 		Set("format", format.Name).Set("exposure_ev", ev).Set("d_range_priority", drpOut).
 		Set("full_resolution", full).Set("warnings", strList(warnings)), lines)
+}
+
+// unique returns name, or name-2, name-3, ... if that is already taken (ignoring case), and takes it.
+func unique(name string, taken map[string]bool) string {
+	out := name
+	for n := 2; taken[strings.ToLower(out)]; n++ {
+		out = fmt.Sprintf("%s-%d", name, n)
+	}
+	taken[strings.ToLower(out)] = true
+	return out
 }
 
 func (e *env) verify(a *Args) error {
@@ -969,7 +1012,7 @@ func commands() []*command {
 				{long: "--timeout", kind: optFloat, def: 90.0, hidden: true}}},
 		{name: "verify", help: "compare a photo's recorded settings with a recipe (needs exiftool)",
 			args:    []positional{{name: "photo"}},
-			options: []option{{long: "--recipe", short: "-r", kind: optString, help: "recipe file or starter name"}}},
+			options: []option{{long: "--recipe", short: "-r", kind: optString, required: true, help: "recipe file or starter name"}}},
 		{name: "recipes", help: "list the bundled starter recipes, or print one",
 			args: []positional{{name: "name", opt: true}}},
 		{name: "schema", help: "print the recipe JSON schema"},

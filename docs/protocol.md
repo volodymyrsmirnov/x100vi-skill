@@ -3,8 +3,8 @@
 Everything here was measured on an X100VI running firmware 1.31, over USB, in
 **CONNECTION MODE = USB RAW CONV./BACKUP RESTORE**. The RAW-conversion sequence and profile layout come
 from [zgrimz/fujifilm-ptp-reference](https://github.com/zgrimz/fujifilm-ptp-reference); the X100VI
-specifics were confirmed here. Codes and value tables were also cross-checked against FUJIFILM X RAW STUDIO
-1.28 for macOS, by reading its files without running it; every code and value below agrees with it.
+specifics were confirmed here: every value below was validated by the camera and checked against the EXIF
+of photos shot or developed with known settings.
 
 ## Transport
 
@@ -14,7 +14,7 @@ specifics were confirmed here. Codes and value tables were also cross-checked ag
   configuration tree. Value ranges were found by asking the camera to validate values and restoring the
   original afterwards.
 - All setting values are 16-bit; negative numbers are two's complement.
-- **Connections.** The same PTP requests travel three ways, as in FUJIFILM X RAW STUDIO:
+- **Connections.** The same PTP requests travel through each system's native camera interface:
   - macOS: ImageCaptureCore. `ptpcamerad` keeps the camera and its PTP session; `ICCameraDevice`
     `requestSendPTPCommand:outData:completion:` takes a full PTP command container plus the raw outgoing
     data and returns the incoming data and the response container. Tested on hardware.
@@ -23,9 +23,8 @@ specifics were confirmed here. Codes and value tables were also cross-checked ag
     read, 14 data to write, 15 read, 16 write, 17 end transfer; properties 1001 operation code, 1002
     parameters, 1003 response code, 1006 transfer context, 1007 total size, 1008 / 1010 bytes to read /
     write, 1012 data, 1013 optimal buffer size). Not tested on hardware.
-  - Any system: libusb, claiming the still-image interface directly. That interface can be held by one
-    process only, so on macOS `ptpcamerad` has to be stopped first, and on Windows the WinUSB driver must
-    replace the inbox one.
+  - Linux: the kernel's usbfs (`/dev/bus/usb`), claiming the still-image interface directly, without
+    libraries. That interface can be held by one process only.
 - **Never download an object before describing it.** `GetObject` on handle 0 (the settings file) sent
   without a preceding `GetObjectInfo` hung the X100VI until its battery was removed. The session layer
   refuses that order.
@@ -40,7 +39,7 @@ specifics were confirmed here. Codes and value tables were also cross-checked ag
 | Image quality | `0xD018` | `0xD18F` | 1 RAW, 2 FINE, 3 NORMAL, 4 FINE+RAW, 5 NORMAL+RAW |
 | Dynamic range | `0xD007` | `0xD190` | 100, 200, 400, `0xFFFF` auto |
 | D-range priority | `0xD02E` | `0xD191` | 0 off, 1 weak, 2 strong, `0x8000` auto |
-| Film simulation | `0xD001` | `0xD192` | 1-20 (see `model.py`) |
+| Film simulation | `0xD001` | `0xD192` | 1-20 (see `internal/model`) |
 | Mono warm/cool | `0xD104` | `0xD193` | -180 to 180, step 10 |
 | Mono magenta/green | `0xD031` | `0xD194` | -180 to 180, step 10 |
 | Grain | `0xD023` | `0xD195` | written 1 off, 2 weak/small, 3 strong/small, 4 weak/large, 5 strong/large; reads 2-5, and 6 / 7 for off small / large |
@@ -73,7 +72,7 @@ indicator and the nine unused ones:
 |---|---|---|
 | `0xD16E` | USB mode, read-only: 6 in this mode (5 tether, 8 webcam on other bodies) | read to confirm the mode |
 | `0xD184` | Conversion profile codes, `FF179503,FA179503` | understood; informational |
-| `0xD186`, `0xD187` | Model key `X100VI_0100`, which X RAW Studio uses to match saved profiles | understood; informational |
+| `0xD186`, `0xD187` | Model key `X100VI_0100` | understood; informational |
 | `0xD212` | Event list; signals when a conversion has finished | understood; the client polls object handles instead |
 | `0xD36A` | Battery, coarse level (10, later 9, as the percentage fell from 43 to 40) | `0xD36B` is used instead |
 | `0xD20B` | Device name, an empty string here | understood; not needed |
@@ -181,8 +180,8 @@ size returns a JPEG.
 - **Output formats**: one frame developed as HEIF and as full-size 8- and 16-bit TIFF; each carried the
   Fujifilm maker notes.
 
-`tests/fake_camera.py` reproduces these behaviours in software so the client is tested without hardware;
-`tests/hardware/` repeats the essential checks on a real body.
+`internal/fakecam` reproduces these behaviours in software so the client is tested without hardware;
+`internal/hardware` repeats the essential checks on a real body.
 
 ---
 

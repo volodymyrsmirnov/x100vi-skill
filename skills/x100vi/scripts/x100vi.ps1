@@ -30,26 +30,31 @@ function Download-Tool {
     }
     New-Item -ItemType Directory -Force -Path $Cache | Out-Null
     [Console]::Error.WriteLine("x100vi: downloading $Asset from $ReleaseUrl ...")
-    $tmp = "$Tool.download"
-    $sums = Join-Path $Cache "SHA256SUMS"
+    # Per-process names, so two launchers downloading at once never share a file.
+    $id = "$PID.$([guid]::NewGuid().ToString('N'))"
+    $tmp = "$Tool.$id.download"
+    $sums = Join-Path $Cache "SHA256SUMS.$id"
     try {
-        Invoke-WebRequest -UseBasicParsing -Uri "$ReleaseUrl/$Asset" -OutFile $tmp
-        Invoke-WebRequest -UseBasicParsing -Uri "$ReleaseUrl/SHA256SUMS" -OutFile $sums
-    } catch {
-        [Console]::Error.WriteLine("error: could not download the x100vi tool from $ReleaseUrl ($($_.Exception.Message))")
-        [Console]::Error.WriteLine("hint: Check the network connection and try again, or download $Asset from https://github.com/volodymyrsmirnov/x100vi-skill/releases and set X100VI_BIN to its path.")
-        exit 127
+        try {
+            Invoke-WebRequest -UseBasicParsing -Uri "$ReleaseUrl/$Asset" -OutFile $tmp
+            Invoke-WebRequest -UseBasicParsing -Uri "$ReleaseUrl/SHA256SUMS" -OutFile $sums
+        } catch {
+            [Console]::Error.WriteLine("error: could not download the x100vi tool from $ReleaseUrl ($($_.Exception.Message))")
+            [Console]::Error.WriteLine("hint: Check the network connection and try again, or download $Asset from https://github.com/volodymyrsmirnov/x100vi-skill/releases and set X100VI_BIN to its path.")
+            exit 127
+        }
+        $line = Get-Content $sums | Where-Object { $_ -match "\s\*?$([regex]::Escape($Asset))$" } | Select-Object -First 1
+        $want = if ($line) { ($line -split '\s+')[0].ToLower() } else { "" }
+        $got = (Get-FileHash -Algorithm SHA256 $tmp).Hash.ToLower()
+        if (-not $want -or $want -ne $got) {
+            [Console]::Error.WriteLine("error: the downloaded $Asset does not match the release checksum; it was not installed")
+            exit 127
+        }
+        Move-Item -Force $tmp $Tool
+    } finally {
+        # Whatever happened, leave no partial download or checksum file behind.
+        Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath $tmp, $sums
     }
-    $line = Get-Content $sums | Where-Object { $_ -match "\s\*?$([regex]::Escape($Asset))$" } | Select-Object -First 1
-    $want = if ($line) { ($line -split '\s+')[0].ToLower() } else { "" }
-    $got = (Get-FileHash -Algorithm SHA256 $tmp).Hash.ToLower()
-    Remove-Item -Force $sums
-    if (-not $want -or $want -ne $got) {
-        Remove-Item -Force $tmp
-        [Console]::Error.WriteLine("error: the downloaded $Asset does not match the release checksum; it was not installed")
-        exit 127
-    }
-    Move-Item -Force $tmp $Tool
 }
 
 if ($args.Count -gt 0 -and $args[0] -eq "--self-update") {

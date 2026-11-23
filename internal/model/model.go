@@ -10,6 +10,7 @@
 package model
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -374,10 +375,7 @@ func EncodeField(f Field, value any) (int, error) {
 			key = fmt.Sprint(x)
 		}
 		if strings.HasPrefix(key, "unknown:0x") {
-			n, err := strconv.ParseInt(key[10:], 16, 32)
-			if err == nil {
-				return int(n), nil // round-trips a code this table has no name for
-			}
+			return unknownCode(f, value, key[len("unknown:0x"):]) // round-trips a code this table has no name for
 		}
 		code, ok := f.Table.Codes[key]
 		if !ok {
@@ -387,9 +385,7 @@ func EncodeField(f Field, value any) (int, error) {
 		return code, nil
 	case NR:
 		if str, isStr := value.(string); isStr && strings.HasPrefix(strings.ToLower(str), "unknown:0x") {
-			if n, err := strconv.ParseInt(str[10:], 16, 32); err == nil {
-				return int(n), nil
-			}
+			return unknownCode(f, value, str[len("unknown:0x"):])
 		}
 		n, ok := toFloat(value)
 		_, isBool := value.(bool)
@@ -436,6 +432,20 @@ func EncodeField(f Field, value any) (int, error) {
 			fmt.Sprintf("Use steps of %s from %s to %s.", fmtG(f.Step), fmtG(f.Lo), fmtG(f.Hi)))
 	}
 	return int(math.Round(n*float64(f.Scale))) & 0xFFFF, nil
+}
+
+// unknownCode reads the hex digits of an "unknown:0x..." value: a 16-bit code a table has no name for.
+func unknownCode(f Field, value any, digits string) (int, error) {
+	n, err := strconv.ParseUint(digits, 16, 16)
+	if errors.Is(err, strconv.ErrRange) {
+		return 0, errs.Recipe(fmt.Sprintf("%s: %s is larger than any camera code (0xFFFF at most)", f.Key, quote(value)),
+			"Use the value exactly as `x100vi get` printed it, or a named value.")
+	}
+	if err != nil {
+		return 0, errs.Recipe(fmt.Sprintf("%s: %s is not a valid code", f.Key, quote(value)),
+			"Write unknown codes as unknown:0x followed by hex digits, e.g. unknown:0x0012, exactly as `x100vi get` prints them.")
+	}
+	return int(n), nil
 }
 
 // DecodeField turns a wire value into the recipe value (string, number or grain object).
@@ -645,7 +655,7 @@ func EncodeRecipe(recipe map[string]any, partial bool) ([]Write, error) {
 			return nil, errs.Recipe("white_balance.kelvin is only used when white_balance.mode is kelvin",
 				`Set "mode": "kelvin", or remove `+"`kelvin`.")
 		}
-		if f.Needs == "jpeg" && Get(full, "image_quality") == "raw" {
+		if q, _ := Get(full, "image_quality").(string); f.Needs == "jpeg" && strings.EqualFold(q, "raw") {
 			return nil, errs.Recipe("image_size cannot be set while image_quality is raw",
 				"Use fine, normal, fine_raw or normal_raw, or remove image_size.")
 		}

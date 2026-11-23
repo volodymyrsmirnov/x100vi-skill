@@ -185,6 +185,79 @@ func TestUSBTransactionIDsCount(t *testing.T) {
 	}
 }
 
+// After four transactions, the fifth (id 5) runs while the camera still holds answers to the fourth,
+// which was interrupted.
+func staleFramer(reads ...[]byte) (*usbFramer, *fakePipe) {
+	pipe := &fakePipe{reads: reads}
+	return &usbFramer{pipe: pipe, outMPS: 512, inMPS: 512, tid: 4}, pipe
+}
+
+func TestUSBMatchingTransactionIDsAreTheAnswer(t *testing.T) {
+	payload := []byte("device info")
+	f, pipe := staleFramer(container(ptp.Data, 0x1001, 5, payload), container(ptp.Resp, ptp.RCOK, 5, []byte{3, 0, 0, 0}))
+	code, params, data, err := f.transact(0x1001, nil, nil)
+	if err != nil || code != ptp.RCOK || !reflect.DeepEqual(params, []uint32{3}) || !bytes.Equal(data, payload) {
+		t.Fatalf("transact = %#x %v %q %v", code, params, data, err)
+	}
+	if len(pipe.reads) != 0 {
+		t.Fatalf("%d transfers left unread", len(pipe.reads))
+	}
+}
+
+func TestUSBDiscardsAStaleResponse(t *testing.T) {
+	f, pipe := staleFramer(container(ptp.Resp, 0x2019, 4, nil), container(ptp.Resp, ptp.RCOK, 5, nil))
+	code, _, data, err := f.transact(0x1016, []uint32{0xD16E}, []byte{1, 0})
+	if err != nil || code != ptp.RCOK || data != nil {
+		t.Fatalf("transact = %#x %v %v", code, data, err)
+	}
+	if len(pipe.reads) != 0 {
+		t.Fatalf("%d transfers left unread", len(pipe.reads))
+	}
+}
+
+func TestUSBDiscardsAStaleDataContainer(t *testing.T) {
+	stale := container(ptp.Data, 0x1009, 4, bytes.Repeat([]byte{0xEE}, usbReadSize+10)) // spans transfers
+	want := []byte{0x01, 0x00}
+	for name, reads := range map[string][][]byte{
+		"data only": {stale[:usbReadSize], stale[usbReadSize:],
+			container(ptp.Data, 0x1015, 5, want), container(ptp.Resp, ptp.RCOK, 5, nil)},
+		"data and response": {stale[:usbReadSize], stale[usbReadSize:], container(ptp.Resp, ptp.RCOK, 4, nil),
+			container(ptp.Data, 0x1015, 5, want), container(ptp.Resp, ptp.RCOK, 5, nil)},
+	} {
+		f, pipe := staleFramer(reads...)
+		code, _, data, err := f.transact(0x1015, []uint32{0xD16E}, nil)
+		if err != nil || code != ptp.RCOK || !bytes.Equal(data, want) {
+			t.Fatalf("%s: transact = %#x %d bytes %v", name, code, len(data), err)
+		}
+		if len(pipe.reads) != 0 {
+			t.Fatalf("%s: %d transfers left unread", name, len(pipe.reads))
+		}
+	}
+}
+
+func TestUSBGivesUpOnEndlessStaleContainers(t *testing.T) {
+	var reads [][]byte
+	for i := 0; i <= maxStaleContainers; i++ {
+		reads = append(reads, container(ptp.Resp, ptp.RCOK, 4, nil))
+	}
+	reads = append(reads, container(ptp.Resp, ptp.RCOK, 5, nil))
+	f, _ := staleFramer(reads...)
+	if _, _, _, err := f.transact(0x1001, nil, nil); !errors.Is(err, errStaleContainers) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestUSBAcceptsTransactionIDZeroOnlyForSessionRequests(t *testing.T) {
+	f, _ := staleFramer(container(ptp.Resp, ptp.RCOK, 0, nil))
+	if code, _, _, err := f.transact(ptp.OpOpenSession, []uint32{1}, nil); err != nil || code != ptp.RCOK {
+		t.Fatalf("OpenSession = %#x %v", code, err)
+	}
+	f, _ = staleFramer(container(ptp.Resp, ptp.RCOK, 0, nil), container(ptp.Resp, 0x2019, 5, nil))
+	if code, _, _, err := f.transact(0x1001, nil, nil); err != nil || code != 0x2019 {
+		t.Fatalf("GetDeviceInfo = %#x %v", code, err)
+	}
+}
+
 func TestUSBReportsPipeErrors(t *testing.T) {
 	f := usbFramer{pipe: &fakePipe{err: errors.New("broken")}, outMPS: 512, inMPS: 512}
 	if _, _, _, err := f.transact(0x1001, nil, nil); err == nil || err.Error() != "broken" {

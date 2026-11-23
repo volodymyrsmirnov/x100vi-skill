@@ -3,12 +3,13 @@
 > 📝 Blog post: [Fujifilm X100VI AI skill: film recipes over USB with Claude Code and Codex](https://volodymyr.smirnov.im/writing/x100vi-skill/)
 
 Create film-simulation recipes for a **Fujifilm X100VI** by describing the look you want, see them
-rendered on your own photos by the camera's processor, and save the ones you like into the camera's
+developed from your own RAW files by the camera's processor, and save the ones you like into the camera's
 custom settings (C1-C7), all over a USB cable.
 
 It is two things in one repository:
 
-- **`x100vi`**, a command-line tool that reads, writes and previews recipes on the camera.
+- **`x100vi`**, a command-line tool that reads, writes and previews recipes on the camera. It is a single
+  self-contained binary for macOS, Linux and Windows.
 - **An agent skill** for [Claude Code](https://code.claude.com) and [Codex](https://github.com/openai/codex)
   that drives the tool for you, so you can say:
 
@@ -16,26 +17,27 @@ It is two things in one repository:
   > best one in C3.
 
 **Previews are developed by the camera itself.** The RAF is sent to the camera over USB, the camera's own
-image processor converts it to a JPEG with the recipe applied, and the JPEG is sent back. Nothing on the
-computer imitates Fujifilm's processing, so what you see is what the camera would have produced.
+image processor develops it with the recipe applied, and the result comes back. Nothing on the computer
+imitates Fujifilm's processing, so what you see is what the camera would have produced.
 
-No firmware is touched. The tool only reads and writes the same camera settings you can change in the
-menu, and uses the same in-camera RAW conversion that Fujifilm's X RAW Studio uses.
+No firmware is touched. The tool reads and writes the same settings you can change in the camera's menu,
+and uses the camera's built-in RAW conversion.
 
 > [!IMPORTANT]
 > **Put the camera in the right USB mode before you connect it.** On the camera:
 > **MENU > NETWORK/USB SETTING > CONNECTION MODE > USB RAW CONV./BACKUP RESTORE**, then plug in the cable.
 >
 > Nothing here works in any other mode, and software cannot change the mode for you. In USB CARD READER
-> mode, which is what most cameras are set to, the camera hides all of its settings. See [Set up the camera](#3-set-up-the-camera-required).
+> mode, which is what most cameras are set to, the camera hides all of its settings. See [Set up the camera](#set-up-the-camera-required).
 
 ## What it can do
 
 | | |
 |---|---|
-| Read | The current shooting settings and C1-C7, as JSON recipes. Back them all up to one file, or save the camera's own settings file with every menu setting. |
+| Read | The current shooting settings and C1-C7, as JSON recipes. |
 | Write | A recipe to the live settings or to any of C1-C7, including its name. Every write is read back and compared. |
-| Preview | Send a RAF to the camera, where the camera's own processor converts it with one or more recipes, to JPEG (with a contact sheet), HEIF or TIFF. The conversion happens entirely on the camera; nothing is stored on it afterwards. |
+| Preview | Develop RAFs on the camera with one or more recipes, as JPEG (with a contact sheet), HEIF, or full-size 8/16-bit TIFF. Nothing is stored on the camera afterwards. |
+| Back up | C1-C7 and the live settings as JSON, or the camera's own settings file with every menu setting, and restore either. |
 | Design | With the skill: turn a description, a list of settings, or a recipe web page into a recipe. |
 
 What a recipe controls: film simulation, grain, colour chrome effect, colour chrome FX blue, smooth skin,
@@ -47,18 +49,12 @@ What it cannot control, because the camera does not expose it over USB: ISO, exp
 aperture, shutter, focus and AF settings, drive mode, metering, flash. Recipes carry these as `notes` for
 you to set on the body.
 
-## Requirements
-
-- A Fujifilm **X100VI** (tested on firmware 1.31) and a USB-C **data** cable.
-- The camera's CONNECTION MODE set to **USB RAW CONV./BACKUP RESTORE** ([how](#3-set-up-the-camera-required)).
-- Node.js 22.20 or later, only to install the skill with `npx skills`. The tool itself is a single
-  binary with no other requirements.
-- macOS (tested). Windows and Linux should work; see [Platforms](#platforms).
-- Optional: [exiftool](https://exiftool.org), only for `x100vi verify` and `preview --verify`.
-
 ## Install
 
-### 1. The skill
+You need a Fujifilm **X100VI** (tested on firmware 1.31) and a USB-C **data** cable. Optional:
+[exiftool](https://exiftool.org), only for `x100vi verify` and `preview --verify`.
+
+### The skill
 
 With the [skills](https://www.npmjs.com/package/skills) CLI (needs Node.js 22.20 or later):
 
@@ -75,21 +71,21 @@ npx skills add volodymyrsmirnov/x100vi-skill -g -a claude-code -a codex -y
 `-g` makes the skill available in every project; leave it out to install into the current project only.
 Start a new agent session afterwards.
 
-**That is all you need.** The skill carries a small launcher that downloads the `x100vi` binary for your
-system from the [latest release](https://github.com/volodymyrsmirnov/x100vi-skill/releases/latest) the
-first time the agent uses it, checks it against the release's checksums, and keeps it in a cache folder.
-`sh x100vi.sh --self-update` (or asking the agent to update the tool) fetches the newest release.
+**That is all you need.** The first time the agent uses the skill, its launcher downloads the `x100vi`
+binary for your system from the [latest release](https://github.com/volodymyrsmirnov/x100vi-skill/releases/latest),
+checks it against the release's checksums, and keeps it in a cache folder. Ask the agent to update the
+tool (or run the launcher with `--self-update`) to fetch the newest release.
 
 Other ways to get the skill:
 
 - **Claude Code plugin**: `/plugin marketplace add volodymyrsmirnov/x100vi-skill`, then
   `/plugin install x100vi@x100vi-skill`.
-- **From the tool** (if you installed it as in step 2): `x100vi install-skill --claude --codex`, or
-  `--dir SKILLS_FOLDER` for any agent that reads `SKILL.md` folders.
+- **From the tool**: `x100vi install-skill --claude --codex`, or `--dir SKILLS_FOLDER` for any agent that
+  reads `SKILL.md` folders.
 
-### 2. The command-line tool (optional)
+### The command-line tool on its own
 
-To use `x100vi` from a terminal, download the binary for your system from the
+Download the binary for your system from the
 [latest release](https://github.com/volodymyrsmirnov/x100vi-skill/releases/latest) and put it on your
 PATH as `x100vi` (`x100vi.exe` on Windows):
 
@@ -110,9 +106,10 @@ chmod +x /usr/local/bin/x100vi && x100vi --version
 ```
 
 A file downloaded with a web browser instead is quarantined by macOS; clear that with
-`xattr -d com.apple.quarantine /usr/local/bin/x100vi`. Every push to `main` publishes a new release.
+`xattr -d com.apple.quarantine /usr/local/bin/x100vi`. `SHA256SUMS` in each release lists the checksums.
+Every push to `main` publishes a new release.
 
-### 3. Set up the camera (required)
+### Set up the camera (required)
 
 Do this on the camera body **before** connecting. It has to be done by hand: the mode cannot be changed
 over USB.
@@ -152,9 +149,8 @@ shoot. Switch CONNECTION MODE back when you are done if you normally use another
 
 ## Using the skill
 
-With the camera in **USB RAW CONV./BACKUP RESTORE** mode and connected ([step 3](#3-set-up-the-camera-required)),
-just ask. If the mode is wrong, the agent stops and tells you how to change it. Examples of what the skill
-handles:
+With the camera in **USB RAW CONV./BACKUP RESTORE** mode and connected, just ask. If the mode is wrong, the
+agent stops and tells you how to change it. Examples of what the skill handles:
 
 - "Make me a moody black-and-white street look and show it on `DSCF4158.RAF`."
 - "Use this recipe: <link to a recipe page>. Put it in C2 and call it PORTRA."
@@ -185,7 +181,8 @@ prompt, while `set` and `restore` still ask before each run.
 ## Using the tool directly
 
 Every command that talks to the camera (`doctor`, `get`, `set`, `backup`, `restore`, `preview`) needs it
-connected in **USB RAW CONV./BACKUP RESTORE** mode. `recipes`, `validate` and `schema` work without a camera.
+connected in **USB RAW CONV./BACKUP RESTORE** mode. `recipes`, `validate`, `verify` and `schema` work without
+a camera.
 
 ```bash
 x100vi recipes                               # bundled starter recipes
@@ -248,52 +245,53 @@ DSCF4103.RAF: shot as classic_chrome, DR200, D-range priority weak
 contact sheet: x100vi-previews/contact-sheet.jpg
 ```
 
-- **The RAW-to-JPEG conversion runs on the camera, not on the computer.** The tool uploads the RAF, tells
-  the camera which settings to use, waits while the camera develops it, and downloads the result. That is
-  why the camera must be connected and switched on, why it uses the camera's battery, and why the output
-  matches an in-camera JPEG.
+- **The conversion runs on the camera, not on the computer.** The tool uploads the RAF, tells the camera
+  which settings to use, waits while the camera develops it, and downloads the result. That is why the
+  camera must be connected and switched on, why it uses the camera's battery, and why the output matches
+  an in-camera JPEG.
 - The RAF must come from an X100VI. It is uploaded once and developed once per recipe.
 - Output is half size by default; `--full` gives full resolution. `--ev 0.67` adds exposure compensation
   (-2 to +3 EV in 1/3 steps; the camera ignores anything outside that when developing).
 - `--d-range-priority weak|strong|plus|off` previews with that D-range priority instead of the recipe's.
   It is the way to preview a recipe set to Auto. `plus` is an extra level beyond strong that only the
-  converter offers; the camera cannot shoot with it.
+  conversion offers; the camera cannot shoot with it.
 - `--format heif` makes HEIF files. `--format tiff` (8-bit) and `--format tiff16` need `--full`, because
   the camera makes TIFF only at full resolution: about 125 MB and 245 MB per image. The contact sheet is
   made for JPEG previews only.
 - A preview shows colour and tone on a frame you already shot. It cannot show what a different ISO or
   exposure at capture would have done.
 
+## How it reaches the camera
+
+The tool uses each system's own interface for cameras, so there are no drivers or libraries to install:
+
+| | Interface | Status |
+|---|---|---|
+| macOS | ImageCaptureCore, the system camera service. Other camera apps (Image Capture, Photos) may stay open. | Tested on a real X100VI. |
+| Windows | Windows Portable Devices, with Windows' own driver. The camera also stays visible in Explorer. | Built and unit-tested in CI; **not yet tested on a camera**. Reports welcome. |
+| Linux | The kernel's USB device interface (usbfs). Unmount the camera if your desktop auto-mounts it, and give your user access to USB vendor `04cb` (udev rule) or use `sudo`. Only one program can hold the camera at a time. | Built and unit-tested in CI; **not yet tested on a camera**. Reports welcome. |
+
+If you once replaced the camera's Windows driver with WinUSB (for example with Zadig), switch it back in
+Device Manager: uninstall the camera device, then unplug and replug it.
+
 ## Safety
 
 - **No firmware operations.** The tool has no code that updates or modifies firmware.
-- **Checks before it acts**: wrong camera model, wrong USB mode, another program holding the camera, an
-  invalid recipe, a RAF from another body, a JPEG instead of a RAF. Each stops with an explanation and a fix.
-- **Writes are verified.** After saving a recipe the whole custom setting is read back; if the camera
-  holds anything else, the command fails and says what differs.
+- **Checks before it acts**: wrong camera model, wrong USB mode, another program or another `x100vi`
+  command using the camera, an invalid recipe, a RAF from another body, a JPEG instead of a RAF. Each stops
+  with an explanation and a fix.
+- **Writes are verified.** After saving a recipe the whole custom setting is read back; if the camera holds
+  anything else, or changed a setting the recipe did not mention, the command fails and says what differs.
 - **Your recipes are not overwritten silently.** `set` refuses an occupied custom setting unless you pass
   `--overwrite`, and saves the previous contents first. `restore` needs `--yes` and backs up first.
-  Automatic backups live in `~/.local/state/x100vi/backups`.
+  Automatic backups live in `~/.local/state/x100vi/backups` (Windows: `%LOCALAPPDATA%\x100vi\backups`).
 - **Full settings files are checked before they are restored**: they must come from an X100VI, match the
   size the camera's firmware uses, and come from the same body (`--other-body` overrides the last check).
   The camera's current file is saved first and the restore is read back. Keep these files private: they
   contain the camera's ID and network settings.
 - **Untested firmware** produces a warning, not a refusal; verification still applies.
-- A RAW conversion that never finishes can leave the camera unresponsive until it is switched off and
-  on. The tool never retries one on its own and tells you when to power-cycle.
-
-## Platforms
-
-| | Status |
-|---|---|
-| macOS | Tested on hardware. Talks to the camera through macOS' own camera service (ImageCaptureCore), the way X RAW STUDIO does, so nothing has to be stopped and Image Capture or Photos may stay open. |
-| Windows | Unit-tested in CI (including the Windows Portable Devices plumbing), **not tested on hardware**. Talks to the camera through Windows Portable Devices with Windows' own driver, the way X RAW STUDIO does: no extra driver needed. Reports welcome. |
-| Linux | Unit-tested in CI, not tested on hardware. Uses libusb. Unmount the camera if your desktop auto-mounts it, and give your user access to USB vendor `04cb` (udev rule) or use `sudo`. |
-
-`X100VI_TRANSPORT` chooses the connection: `auto` (default), `icc` (macOS), `wpd` (Windows) or `usb`
-(libusb on any system; on macOS it stops `ptpcamerad`, on Windows it needs the WinUSB driver from
-[Zadig](https://zadig.akeo.ie)). On Linux only one program can hold the camera at a time, so quit other
-camera apps first.
+- A RAW conversion that never finishes can leave the camera unresponsive until it is switched off and on.
+  The tool never starts another conversion after one timed out, and tells you when to power-cycle.
 
 ## Troubleshooting
 
@@ -302,8 +300,8 @@ camera apps first.
 
 ## Development
 
-Needs Go (the version in `go.mod`); on macOS also the Xcode command-line tools, for the
-ImageCaptureCore bridge.
+The tool is written in Go. You need the Go version in `go.mod`; on macOS also the Xcode command-line tools
+(the ImageCaptureCore bridge uses cgo).
 
 ```bash
 git clone https://github.com/volodymyrsmirnov/x100vi-skill

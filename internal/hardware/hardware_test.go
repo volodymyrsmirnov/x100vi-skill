@@ -12,6 +12,7 @@ package hardware
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -149,51 +150,152 @@ func TestReadsLiveAndEveryRegisterAsValidRecipes(t *testing.T) {
 
 func TestRegisterRoundTripAndExactRestore(t *testing.T) {
 	slot := testSlot()
-	withCamera(t, func(c *camera.Camera) {
-		originalRaw := rawRegister(t, c, slot)
-		original, err := c.Read(&slot)
-		if !check(t, err, "read slot") {
-			return
+	withCamera(t, func(c *camera.Camera) { roundTripAndRestore(t, c, slot) })
+}
+
+// wbRemembered is what a register keeps for one white-balance mode: its shift, and for the kelvin mode
+// also the colour temperature.
+type wbRemembered struct{ ShiftR, ShiftB, Kelvin int }
+
+var (
+	propDRP    = model.ByKey["d_range_priority"].Slot
+	propWBMode = model.ByKey["white_balance.mode"].Slot
+	propShiftR = model.ByKey["white_balance.shift_r"].Slot
+	propShiftB = model.ByKey["white_balance.shift_b"].Slot
+	propKelvin = model.ByKey["white_balance.kelvin"].Slot
+)
+
+// wbMemory reads what the register remembers for every white-balance mode by selecting each mode in
+// turn, the way ClearWBMemory walks them (D-range priority off first). It changes the register's active
+// mode and D-range priority: re-apply the register's recipe afterwards.
+func wbMemory(t *testing.T, c *camera.Camera, slot int) (map[string]wbRemembered, bool) {
+	t.Helper()
+	if !check(t, c.Session.SetU16(model.SlotSelect, slot), "select") ||
+		!check(t, c.Session.SetU16(propDRP, 0), "D-range priority off") {
+		return nil, false
+	}
+	out := map[string]wbRemembered{}
+	for _, mode := range model.WhiteBalance.Names {
+		if !check(t, c.Session.SetU16(propWBMode, model.WhiteBalance.Codes[mode]), "select WB "+mode) {
+			return nil, false
 		}
-		liveBefore, err := c.Read(nil)
-		if !check(t, err, "read live") {
-			return
+		var m wbRemembered
+		var errR, errB, errK error
+		m.ShiftR, errR = c.Session.GetU16(propShiftR)
+		m.ShiftB, errB = c.Session.GetU16(propShiftB)
+		if mode == "kelvin" {
+			m.Kelvin, errK = c.Session.GetU16(propKelvin)
 		}
-		func() {
-			defer func() {
-				check(t, c.ClearWBMemory(slot), "clear WB memory")
-				_, err := c.Write(original.ToPlain(), &slot, false)
-				check(t, err, "restore")
-			}()
-			if _, err := c.Write(probe, &slot, false); !check(t, err, "write probe") {
-				return
-			}
-			got, err := c.Read(&slot)
-			if !check(t, err, "read back") {
-				return
-			}
-			plain := got.ToPlain()
-			for key, want := range probe {
-				if model.Quote(model.Plain(map[string]any{"v": plain[key]})["v"]) != model.Quote(want) {
-					t.Errorf("%s: got %v, want %v", key, plain[key], want)
-				}
+		if !check(t, errors.Join(errR, errB, errK), "read WB "+mode) {
+			return nil, false
+		}
+		out[mode] = m
+	}
+	return out, true
+}
+
+// restoreWBMemory puts back what wbMemory read. A Kelvin change zeroes the shift, so the temperature
+// goes first; switching modes stores the current shift for the mode being left, so each mode's shift is
+// written while that mode is selected. The active mode is left wherever the walk ends.
+func restoreWBMemory(t *testing.T, c *camera.Camera, slot int, mem map[string]wbRemembered) bool {
+	t.Helper()
+	if !check(t, c.Session.SetU16(model.SlotSelect, slot), "select") ||
+		!check(t, c.Session.SetU16(propDRP, 0), "D-range priority off") {
+		return false
+	}
+	ok := true
+	for _, mode := range model.WhiteBalance.Names {
+		m, known := mem[mode]
+		if !known {
+			continue
+		}
+		if !check(t, c.Session.SetU16(propWBMode, model.WhiteBalance.Codes[mode]), "select WB "+mode) {
+			ok = false
+			continue
+		}
+		if mode == "kelvin" {
+			ok = check(t, c.Session.SetU16(propKelvin, m.Kelvin), "restore kelvin") && ok
+		}
+		ok = check(t, c.Session.SetU16(propShiftR, m.ShiftR), "restore shift R of "+mode) && ok
+		ok = check(t, c.Session.SetU16(propShiftB, m.ShiftB), "restore shift B of "+mode) && ok
+	}
+	return ok
+}
+
+// roundTripAndRestore writes the probe recipe to a register, checks it, and puts the register back
+// exactly: its settings byte for byte and what it remembers for every white-balance mode.
+func roundTripAndRestore(t *testing.T, c *camera.Camera, slot int) {
+	t.Helper()
+	if !check(t, c.RequireReady(), "ready") { // before the first selector write
+		return
+	}
+	originalRaw := rawRegister(t, c, slot)
+	original, err := c.Read(&slot)
+	if !check(t, err, "read slot") {
+		return
+	}
+	liveBefore, err := c.Read(nil)
+	if !check(t, err, "read live") {
+		return
+	}
+	reapply := func(what string) bool {
+		_, err := c.Write(original.ToPlain(), &slot, false)
+		return check(t, err, what)
+	}
+	var memBefore map[string]wbRemembered
+	func() {
+		defer func() {
+			check(t, c.ClearWBMemory(slot), "clear WB memory")
+			reapply("restore")
+			if memBefore != nil {
+				restoreWBMemory(t, c, slot, memBefore)
+				reapply("re-apply the original recipe after restoring WB memory") // the original active mode
 			}
 		}()
-		after := rawRegister(t, c, slot)
-		for code, b := range originalRaw {
-			if !bytes.Equal(after[code], b) {
-				t.Errorf("register 0x%04X not restored: % x -> % x", code, b, after[code])
+		mem, ok := wbMemory(t, c, slot)
+		if !ok {
+			return
+		}
+		memBefore = mem
+		if _, err := c.Write(probe, &slot, false); !check(t, err, "write probe") {
+			return
+		}
+		got, err := c.Read(&slot)
+		if !check(t, err, "read back") {
+			return
+		}
+		plain := got.ToPlain()
+		for key, want := range probe {
+			if model.Quote(model.Plain(map[string]any{"v": plain[key]})["v"]) != model.Quote(want) {
+				t.Errorf("%s: got %v, want %v", key, plain[key], want)
 			}
 		}
-		liveAfter, err := c.Read(nil)
-		if check(t, err, "read live after") {
-			a, _ := liveAfter.MarshalJSON()
-			b, _ := liveBefore.MarshalJSON()
-			if !bytes.Equal(a, b) {
-				t.Errorf("live settings changed:\n%s\n%s", b, a)
+	}()
+	if memBefore != nil {
+		memAfter, ok := wbMemory(t, c, slot)
+		reapply("re-apply the original recipe after reading WB memory")
+		if ok {
+			for _, mode := range model.WhiteBalance.Names {
+				if memAfter[mode] != memBefore[mode] {
+					t.Errorf("WB memory of %s not restored: %+v -> %+v", mode, memBefore[mode], memAfter[mode])
+				}
 			}
 		}
-	})
+	}
+	after := rawRegister(t, c, slot)
+	for code, b := range originalRaw {
+		if !bytes.Equal(after[code], b) {
+			t.Errorf("register 0x%04X not restored: % x -> % x", code, b, after[code])
+		}
+	}
+	liveAfter, err := c.Read(nil)
+	if check(t, err, "read live after") {
+		a, _ := liveAfter.MarshalJSON()
+		b, _ := liveBefore.MarshalJSON()
+		if !bytes.Equal(a, b) {
+			t.Errorf("live settings changed:\n%s\n%s", b, a)
+		}
+	}
 }
 
 func needRAF(t *testing.T) string {
@@ -298,7 +400,10 @@ func TestDevelopsHEIFAndFullSizeTIFF(t *testing.T) {
 			return
 		}
 		heif, err := conv.Develop(shot, false, 0, "heif")
-		if check(t, err, "heif") && (len(heif) < 500_000 || string(heif[4:8]) != "ftyp") {
+		if !check(t, err, "heif") {
+			return // never start another conversion after one failed: the body may still be busy
+		}
+		if len(heif) < 500_000 || string(heif[4:8]) != "ftyp" {
 			t.Errorf("not a HEIF: %d bytes", len(heif))
 		}
 		tiff, err := conv.Develop(shot, true, 0, "tiff")

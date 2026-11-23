@@ -188,6 +188,16 @@ func code(f model.Field, slot *int) uint16 {
 	return f.Slot
 }
 
+// keyOf names the recipe setting behind a property code.
+func keyOf(p uint16, slot *int) string {
+	for _, f := range model.Fields {
+		if code(f, slot) == p {
+			return f.Key
+		}
+	}
+	return "unknown"
+}
+
 func (c *Camera) selectSlot(slot *int) error {
 	if slot == nil {
 		return nil
@@ -406,28 +416,35 @@ func (c *Camera) Write(recipe map[string]any, slot *int, partial bool) ([]string
 	for _, w := range writes {
 		wbChanged = wbChanged || w.Field.Key == "white_balance.mode"
 	}
-	after, err := c.snapshot(slot)
-	if err != nil {
-		return nil, err
-	}
-	for _, p := range c.codes(slot) {
+	sideEffect := func(p uint16) bool {
 		_, isIntended := intended[p]
-		if isIntended || after[p] == before[p] || (wbChanged && wbGroup[p]) {
-			continue
+		return !isIntended && !(wbChanged && wbGroup[p])
+	}
+	// Two passes: the camera refuses some settings while another one locks them (image size while
+	// quality is RAW), so a setting refused in the first pass may be accepted once the others are back.
+	for pass := 0; pass < 2; pass++ {
+		now, err := c.snapshot(slot)
+		if err != nil {
+			return nil, err
 		}
-		var rerr error
-		if grainCodes[p] && (before[p] == 6 || before[p] == 7) {
-			size := "large"
-			if before[p] == 6 {
-				size = "small"
+		for _, p := range c.codes(slot) {
+			if !sideEffect(p) || now[p] == before[p] {
+				continue
 			}
-			_, rerr = c.setGrainOff(p, size)
-		} else {
-			rerr = c.Session.SetU16(p, before[p])
+			var rerr error
+			if grainCodes[p] && (before[p] == 6 || before[p] == 7) {
+				size := "large"
+				if before[p] == 6 {
+					size = "small"
+				}
+				_, rerr = c.setGrainOff(p, size)
+			} else {
+				rerr = c.Session.SetU16(p, before[p])
+			}
+			if rerr != nil && !refused(rerr) {
+				return nil, rerr
+			} // a refusal is retried in the next pass, then reported below
 		}
-		if rerr != nil && !refused(rerr) {
-			return nil, rerr
-		} // a refusal is reported by the final comparison below if it matters
 	}
 	final, err := c.snapshot(slot)
 	if err != nil {
@@ -442,6 +459,19 @@ func (c *Camera) Write(recipe map[string]any, slot *int, partial bool) ([]string
 	if len(wrong) > 0 {
 		return nil, errs.Recipe("the camera did not keep every setting: "+strings.Join(wrong, "; "),
 			"Nothing else was changed. Run `x100vi get` to see the current state.")
+	}
+	var changed []string
+	for _, p := range c.codes(slot) {
+		if sideEffect(p) && final[p] != before[p] {
+			changed = append(changed, fmt.Sprintf("%s (0x%04X) was 0x%04X, camera holds 0x%04X",
+				keyOf(p, slot), p, before[p], final[p]))
+		}
+	}
+	if len(changed) > 0 {
+		return nil, errs.Recipe("the camera did not put back every setting the recipe left alone: "+
+			strings.Join(changed, "; "),
+			fmt.Sprintf("The recipe's own settings were written. Run `x100vi get %s` to see the current state, "+
+				"and add the settings named here to the recipe to choose them yourself.", model.TargetLabel(slot)))
 	}
 	if slot != nil && (hasName || !partial) {
 		stored, err := c.Session.GetString(model.SlotName)
