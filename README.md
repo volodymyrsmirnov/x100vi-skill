@@ -16,6 +16,13 @@ It is two things in one repository:
 No firmware is touched. The tool only reads and writes the same camera settings you can change in the
 menu, and uses the same RAW-conversion feature as Fujifilm's X RAW STUDIO.
 
+> [!IMPORTANT]
+> **Put the camera in the right USB mode before you connect it.** On the camera:
+> **MENU > NETWORK/USB SETTING > CONNECTION MODE > USB RAW CONV./BACKUP RESTORE**, then plug in the cable.
+>
+> Nothing here works in any other mode, and software cannot change the mode for you. In USB CARD READER
+> mode, which is what most cameras are set to, the camera hides all of its settings. See [Set up the camera](#3-set-up-the-camera-required).
+
 ## What it can do
 
 | | |
@@ -37,6 +44,7 @@ you to set on the body.
 ## Requirements
 
 - A Fujifilm **X100VI** (tested on firmware 1.31) and a USB-C **data** cable.
+- The camera's CONNECTION MODE set to **USB RAW CONV./BACKUP RESTORE** ([how](#3-set-up-the-camera-required)).
 - [uv](https://docs.astral.sh/uv/) (or pipx with Python 3.10 or newer) to install and run the tool.
 - Node.js 22.20 or later, only if you install the skill with `npx skills`.
 - macOS (tested). Linux should work; Windows needs an extra driver. See [Platforms](#platforms).
@@ -87,10 +95,21 @@ x100vi --version
 With pipx instead: `pipx install git+https://github.com/volodymyrsmirnov/x100vi-skill`. The skill uses an
 installed `x100vi` when it finds one. To update later: `uv tool upgrade x100vi`.
 
-### 3. The camera
+### 3. Set up the camera (required)
 
-On the camera: **MENU > NETWORK/USB SETTING > CONNECTION MODE > USB RAW CONV./BACKUP RESTORE**. Connect the
-cable and switch the camera on. Then:
+Do this on the camera body **before** connecting. It has to be done by hand: the mode cannot be changed
+over USB.
+
+1. Press **MENU/OK** and open **NETWORK/USB SETTING**.
+2. Choose **CONNECTION MODE**, then **USB RAW CONV./BACKUP RESTORE**.
+3. Connect the camera to the computer with the USB-C cable and switch it on.
+4. If the cable was already plugged in when you changed the mode, unplug it and plug it back in.
+
+The camera keeps this setting, so you only repeat it if you switch to another mode in between (for
+example USB CARD READER to copy photos). The X100VI has no tether mode; this is the only USB mode that
+exposes settings.
+
+Check it:
 
 ```bash
 x100vi doctor
@@ -103,12 +122,22 @@ battery: about 80%
 ready
 ```
 
-The X100VI has no tether mode; this is the only USB mode that exposes settings. While connected in it the
-camera's controls are locked. Switch CONNECTION MODE back when you are done if you normally use another.
+In the wrong mode nothing is read or written, and you are told what to change:
+
+```text
+not ready: the camera is in USB CARD READER, so its settings are not reachable
+  On the camera: MENU > NETWORK/USB SETTING > CONNECTION MODE > USB RAW CONV./BACKUP RESTORE. Then unplug
+  and replug the USB cable.
+```
+
+While connected in this mode the camera shows a USB screen and its controls are locked; unplug it to
+shoot. Switch CONNECTION MODE back when you are done if you normally use another.
 
 ## Using the skill
 
-Just ask. Examples of what the skill handles:
+With the camera in **USB RAW CONV./BACKUP RESTORE** mode and connected ([step 3](#3-set-up-the-camera-required)),
+just ask. If the mode is wrong, the agent stops and tells you how to change it. Examples of what the skill
+handles:
 
 - "Make me a moody black-and-white street look and show it on `DSCF4158.RAF`."
 - "Use this recipe: <link to a recipe page>. Put it in C2 and call it PORTRA."
@@ -119,6 +148,9 @@ It asks before writing to the camera, never replaces a custom setting that alrea
 your say-so, and tells you when a preview could not show a setting because of how the photo was taken.
 
 ## Using the tool directly
+
+Every command that talks to the camera (`doctor`, `get`, `set`, `backup`, `restore`, `preview`) needs it
+connected in **USB RAW CONV./BACKUP RESTORE** mode. `recipes`, `validate` and `schema` work without a camera.
 
 ```bash
 x100vi recipes                               # bundled starter recipes
