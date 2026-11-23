@@ -115,7 +115,8 @@ def test_rules_cover_the_launcher_that_install_skill_put_under_a_custom_codex_ho
     assert launcher.is_file()
     r = run("sandbox-help", "--write-codex-rules", "--json")
     rules = (tmp_path / "custom-codex" / "rules" / "x100vi.rules").read_text()
-    assert r.json["codex"]["written"] and f'"{launcher}"' in rules
+    quoted = sandbox._starlark_list([str(launcher)])[1:-1]      # backslashes in Windows paths are escaped
+    assert r.json["codex"]["written"] and quoted in rules
     assert f"sh {launcher} *" in r.json["claude_code"]["settings"]["sandbox"]["excludedCommands"]
 
 
