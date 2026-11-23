@@ -86,12 +86,37 @@ def test_codex_rules_without_an_installed_skill_and_with_awkward_paths():
     assert '"C:\\\\Tools\\\\x \\"y\\"\\\\x100vi.exe"' in rules
 
 
-def test_launcher_paths_finds_installed_copies(tmp_path):
+def test_launcher_paths_finds_installed_copies(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "no-codex"))
     script = tmp_path / ".agents" / "skills" / "x100vi" / "scripts" / "x100vi.sh"
     script.parent.mkdir(parents=True)
     script.write_text("#!/bin/sh\n")
     assert sandbox.launcher_paths(tmp_path)[0] == str(script)
     assert sandbox.launcher_paths(tmp_path / "nobody") == []
+
+
+def test_launcher_paths_follow_a_custom_codex_home(tmp_path, monkeypatch):
+    custom = tmp_path / "elsewhere" / "codex"
+    script = custom / "skills" / "x100vi" / "scripts" / "x100vi.sh"
+    script.parent.mkdir(parents=True)
+    script.write_text("#!/bin/sh\n")
+    monkeypatch.setenv("CODEX_HOME", str(custom))
+    assert sandbox.launcher_paths(tmp_path / "home") == [str(script)]
+    monkeypatch.delenv("CODEX_HOME")
+    assert sandbox.launcher_paths(tmp_path / "home") == []
+
+
+def test_rules_cover_the_launcher_that_install_skill_put_under_a_custom_codex_home(run, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "custom-codex"))
+    assert run("install-skill", "--codex").code == 0
+    launcher = tmp_path / "custom-codex" / "skills" / "x100vi" / "scripts" / "x100vi.sh"
+    assert launcher.is_file()
+    r = run("sandbox-help", "--write-codex-rules", "--json")
+    rules = (tmp_path / "custom-codex" / "rules" / "x100vi.rules").read_text()
+    assert r.json["codex"]["written"] and f'"{launcher}"' in rules
+    assert f"sh {launcher} *" in r.json["claude_code"]["settings"]["sandbox"]["excludedCommands"]
 
 
 def test_claude_settings_fragment():

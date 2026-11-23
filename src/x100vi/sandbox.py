@@ -17,12 +17,19 @@ WHY_READ = "x100vi talks to the camera over USB, which is not reachable inside t
 WHY_WRITE = "x100vi changes camera settings or installs itself; it needs USB or the network, so approve each run"
 
 
+def codex_home() -> Path:
+    """Codex's configuration folder: $CODEX_HOME when set, else ~/.codex (as `install-skill --codex` uses)."""
+    return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+
+
 def launcher_paths(home: Path | None = None) -> list[str]:
     """Every installed copy of the skill's launcher, as an agent would spell its path."""
     home = home or Path.home()
+    roots = [home / rel for rel in SKILL_HOMES]
+    roots.append(codex_home() / "skills")       # may differ from ~/.codex/skills when CODEX_HOME is set
     found: list[str] = []
-    for rel in SKILL_HOMES:
-        path = home / rel / "x100vi" / "scripts" / "x100vi.sh"
+    for root in roots:
+        path = root / "x100vi" / "scripts" / "x100vi.sh"
         if path.is_file():
             for spelling in (str(path), str(path.resolve())):
                 if spelling not in found:
@@ -66,7 +73,7 @@ def codex_rules(tools: list[str] | None = None, launchers: list[str] | None = No
 
 
 def codex_rules_path() -> Path:
-    return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "rules" / "x100vi.rules"
+    return codex_home() / "rules" / "x100vi.rules"
 
 
 def claude_settings(tools: list[str] | None = None, launchers: list[str] | None = None) -> dict:

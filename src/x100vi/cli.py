@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import shutil
 import sys
 from collections.abc import Callable
@@ -18,6 +17,7 @@ from . import model as m
 from .camera import open_camera
 from .errors import MODE_MENU, RecipeError, SlotOccupiedError, X100VIError
 from .ptp import Transport
+from .sandbox import codex_home
 
 TransportFactory = Callable[[], Transport] | None
 ON_BODY = "ISO, exposure compensation, focus and drive settings are not reachable over USB; set them on the camera."
@@ -322,7 +322,7 @@ def cmd_install_skill(a, out: Out, tf: TransportFactory) -> int:
     if a.claude:
         targets.append(Path.home() / ".claude" / "skills" / "x100vi")
     if a.codex:
-        targets.append(Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "skills" / "x100vi")
+        targets.append(codex_home() / "skills" / "x100vi")
     if a.dir:
         targets.append(Path(a.dir).expanduser() / "x100vi")
     if not targets:
