@@ -1,0 +1,4 @@
+# Embedded files (recipes, schema, skill) must be byte-identical on every platform.
+* text=auto eol=lf
+*.bin binary
+*.ps1 text eol=crlf

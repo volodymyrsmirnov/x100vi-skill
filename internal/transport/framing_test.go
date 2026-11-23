@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
 	"time"
 	"unsafe"
@@ -267,6 +268,9 @@ func TestParseDescriptorsErrors(t *testing.T) {
 }
 
 func TestFindUSBInSysfs(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("sysfs device names contain ':', which Windows does not allow in file names")
+	}
 	root := t.TempDir()
 	add := func(name string, files map[string]string) {
 		dir := filepath.Join(root, "bus", "usb", "devices", name)

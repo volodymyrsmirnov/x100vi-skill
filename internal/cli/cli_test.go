@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -493,7 +494,7 @@ func TestInstallSkillCopiesIntoASkillsFolder(t *testing.T) {
 		t.Errorf("installed = %v", got)
 	}
 	launcher, err := os.Stat(filepath.Join(skills, "x100vi", "scripts", "x100vi.sh"))
-	if err != nil || launcher.Mode()&0o100 == 0 {
+	if err != nil || (runtime.GOOS != "windows" && launcher.Mode()&0o100 == 0) { // Windows has no executable bit
 		t.Errorf("launcher is missing or not executable: %v", err)
 	}
 	wantCode(t, runWith(t, boom(t), "install-skill", "--dir", skills), 0) // reinstalling replaces our own copy
