@@ -83,10 +83,12 @@ class WpdTransport:
 
     # -- COM helpers ------------------------------------------------------------------------
     def _key(self, fmtid: str, pid: int):
-        key = self._api._tagpropertykey()
+        """A REFPROPERTYKEY for IPortableDeviceValues: a pointer to the property-key struct of the
+        PortableDeviceTypes library (the API library declares its own, incompatible copy)."""
+        key = self._types._tagpropertykey()
         key.fmtid = self._comtypes.GUID(fmtid)
         key.pid = pid
-        return key
+        return ctypes.pointer(key)
 
     def _values(self):
         return self._create(self._types.PortableDeviceValues, clsctx=self._inproc,
@@ -130,8 +132,16 @@ class WpdTransport:
             raise CameraNotRespondingError(f"Windows reported error 0x{hr & 0xFFFFFFFF:08X} during {what}")
         return results
 
-    def _buffer(self, data: bytes):
-        return (ctypes.c_ubyte * max(len(data), 1)).from_buffer_copy(data or b"\0"), len(data)
+    def _set_buffer(self, values, pid: int, data: bytes) -> None:
+        buf = (ctypes.c_ubyte * max(len(data), 1)).from_buffer_copy(data or b"\0")
+        values.SetBufferValue(self._key(MTP_EXT, pid), ctypes.cast(buf, ctypes.POINTER(ctypes.c_ubyte)), len(data))
+
+    def _get_buffer(self, values, pid: int) -> bytes:
+        pointer, length = values.GetBufferValue(self._key(MTP_EXT, pid))
+        try:
+            return ctypes.string_at(pointer, length)
+        finally:
+            ctypes.windll.ole32.CoTaskMemFree(pointer)
 
     # -- PTP --------------------------------------------------------------------------------
     def transact(self, op: int, params: tuple = (), data_out: bytes | None = None) -> tuple[int, tuple, bytes]:
@@ -163,14 +173,9 @@ class WpdTransport:
             values = self._command(CMD_READ)
             values.SetStringValue(self._key(MTP_EXT, P_CONTEXT), context)
             values.SetUnsignedIntegerValue(self._key(MTP_EXT, P_BYTES_TO_READ), want)
-            buf, size = self._buffer(bytes(want))
-            values.SetBufferValue(self._key(MTP_EXT, P_DATA), buf, size)
+            self._set_buffer(values, P_DATA, bytes(want))
             results = self._send(values, what)
-            pointer, length = results.GetBufferValue(self._key(MTP_EXT, P_DATA))
-            try:
-                part = ctypes.string_at(pointer, length)
-            finally:
-                ctypes.windll.ole32.CoTaskMemFree(pointer)
+            part = self._get_buffer(results, P_DATA)
             if not part:
                 break
             parts.append(part)
@@ -189,8 +194,7 @@ class WpdTransport:
             values = self._command(CMD_WRITE)
             values.SetStringValue(self._key(MTP_EXT, P_CONTEXT), context)
             values.SetUnsignedIntegerValue(self._key(MTP_EXT, P_BYTES_TO_WRITE), len(piece))
-            buf, size = self._buffer(piece)
-            values.SetBufferValue(self._key(MTP_EXT, P_DATA), buf, size)
+            self._set_buffer(values, P_DATA, piece)
             self._send(values, what)
         return self._end(context, what), (), b""
 
