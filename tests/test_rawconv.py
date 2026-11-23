@@ -84,7 +84,25 @@ def test_priority_on_reports_the_settings_it_makes_the_camera_ignore():
 def test_priority_auto_cannot_be_previewed():
     with pytest.raises(RecipeError) as e:
         apply_recipe(as_shot(), {"d_range_priority": "auto"})
-    assert "weak or strong" in e.value.hint
+    assert "--d-range-priority" in e.value.hint
+
+
+def test_preview_priority_override_including_plus():
+    p, adj = apply_recipe(as_shot(), {"d_range_priority": "auto", "film_simulation": "velvia"}, d_range_priority="plus")
+    assert p.get(7) == 3 and p.get(8) == 2
+    assert adj[0].setting == "d_range_priority" and (adj[0].requested, adj[0].applied) == ("auto", "plus")
+    p, adj = apply_recipe(as_shot(), {"d_range_priority": "weak"}, d_range_priority="off")
+    assert p.get(7) == 0 and [a.applied for a in adj] == ["off"]
+    p, adj = apply_recipe(as_shot(), {"d_range_priority": "strong"}, d_range_priority="strong")
+    assert p.get(7) == 2 and adj == []
+    with pytest.raises(RecipeError, match="not a preview level"):
+        apply_recipe(as_shot(), {}, d_range_priority="auto")
+
+
+def test_describe_names_the_plus_level():
+    p = as_shot()
+    p.set(7, 3)
+    assert describe(p)["d_range_priority"] == "plus"
 
 
 def test_monochrome_recipe_leaves_the_colour_cell_alone():
@@ -102,12 +120,12 @@ def test_the_as_shot_profile_is_never_modified():
 
 
 @pytest.mark.parametrize("ev, cell", [
-    (0, 0), (1 / 3, 333), (0.33, 333), (2 / 3, 667), (0.67, 667), (-1 / 3, -333), (1, 1000), (-3, -3000)])
+    (0, 0), (1 / 3, 333), (0.33, 333), (2 / 3, 667), (0.67, 667), (-1 / 3, -333), (1, 1000), (-2, -2000), (3, 3000)])
 def test_exposure_in_thirds(ev, cell):
     assert apply_recipe(as_shot(), {}, ev)[0].get(5) == cell
 
 
-@pytest.mark.parametrize("ev", [0.5, 3.33, -4, 0.1])
+@pytest.mark.parametrize("ev", [0.5, 3.33, -4, 0.1, -2.33, -3])
 def test_exposure_off_the_grid_is_refused(ev):
     with pytest.raises(RecipeError):
         apply_recipe(as_shot(), {}, ev)
@@ -172,9 +190,39 @@ def test_a_conversion_that_never_finishes_times_out_without_retrying(camera, fak
 
 
 def test_only_the_new_object_is_fetched_and_deleted(camera, fake, raf):
-    fake.objects[40] = b"\xff\xd8leftover\xff\xd9"   # e.g. left behind by an earlier, interrupted run
+    fake.objects[40] = (0x3801, b"\xff\xd8leftover\xff\xd9")   # e.g. left behind by an earlier, interrupted run
     fake.next_handle = 41
     conv = RawConverter(camera)
     shot = conv.upload(raf.read_bytes())
     assert rendered_cells(conv.develop(shot))["cells"][8] == 11
     assert list(fake.objects) == [40]
+
+
+@pytest.mark.parametrize(("output", "full", "magic", "filetype"), [
+    ("jpeg", False, b"\xff\xd8", 7), ("heif", False, b"\x00\x00\x00\x18ftyp", 18),
+    ("tiff", True, b"II*\x00", 9), ("tiff16", True, b"II*\x00", 11)])
+def test_output_formats_set_the_file_type_cell(camera, fake, raf, output, full, magic, filetype):
+    conv = RawConverter(camera)
+    shot = conv.upload(raf.read_bytes())
+    image = conv.develop(shot, full=full, output=output)
+    assert image.startswith(magic)
+    assert not fake.objects and shot.get(2) == 7     # the as-shot profile is left alone
+
+
+def test_tiff_needs_full_resolution(camera, raf):
+    conv = RawConverter(camera)
+    shot = conv.upload(raf.read_bytes())
+    with pytest.raises(RecipeError, match="full resolution"):
+        conv.develop(shot, output="tiff")
+
+
+def test_a_body_that_ignores_the_file_type_is_reported(camera, fake, raf, monkeypatch):
+    from x100vi import rawconv
+
+    conv = RawConverter(camera)
+    shot = conv.upload(raf.read_bytes())
+    # pretend half-size TIFF were allowed: the body answers with a JPEG, which must not be saved as TIFF
+    monkeypatch.setitem(rawconv.OUTPUT_FORMATS, "tiff", rawconv.OutputFormat("tiff", 9, 0x380D, "tif", False, "TIFF"))
+    with pytest.raises(ConversionError, match="other than TIFF"):
+        conv.develop(shot, output="tiff")
+    assert not fake.objects

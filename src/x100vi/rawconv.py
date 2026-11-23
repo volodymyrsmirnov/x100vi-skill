@@ -6,7 +6,10 @@ This is the FUJIFILM X RAW STUDIO flow (camera in USB RAW CONV./BACKUP RESTORE m
   GetDevicePropValue 0xD185                    profile describing the RAF's as-shot settings
   SetDevicePropValue 0xD185                    patched profile, 629-byte host-write form
   SetDevicePropValue 0xD183 = 0 | 1            develop: half size | full resolution
-  GetObjectHandles / GetObject / DeleteObject  fetch the JPEG and remove it from the buffer
+  GetObjectHandles / GetObject / DeleteObject  fetch the image and remove it from the buffer
+
+Profile cell 2 picks the output: JPEG 7, HEIF 18, TIFF 8-bit 9, TIFF 16-bit 11 (codes from X RAW STUDIO's
+profile keywords). The body produces TIFF only at full resolution; at half size it returns a JPEG.
 
 Sequence and profile layout follow github.com/zgrimz/fujifilm-ptp-reference (docs 05, 06).
 The profile cells hold the same wire values as the custom-register properties in model.py.
@@ -30,6 +33,31 @@ FORMAT_RAF = 0xF802
 FORMAT_JPEG = 0x3801
 RAF_MAGIC = b"FUJIFILMCCD-RAW "
 
+
+@dataclass(frozen=True)
+class OutputFormat:
+    name: str
+    filetype: int          # profile cell 2
+    object_format: int     # PTP ObjectFormat of the developed image
+    extension: str
+    full_only: bool        # the body ignores the file type at half size
+    label: str
+
+    def matches(self, image: bytes) -> bool:
+        if self.extension == "jpg":
+            return image[:2] == b"\xff\xd8"
+        if self.extension == "heif":
+            return image[4:8] == b"ftyp"
+        return image[:4] in (b"II*\x00", b"MM\x00*")
+
+
+OUTPUT_FORMATS = {f.name: f for f in (
+    OutputFormat("jpeg", 7, FORMAT_JPEG, "jpg", False, "JPEG"),
+    OutputFormat("heif", 18, 0x3812, "heif", False, "HEIF"),
+    OutputFormat("tiff", 9, 0x380D, "tif", True, "8-bit TIFF"),
+    OutputFormat("tiff16", 11, 0x380D, "tif", True, "16-bit TIFF"),
+)}
+
 TABLE = 0x1FD        # cell i lives at TABLE + 4*i, signed 32-bit little endian
 HOST_CELLS = 30      # X RAW STUDIO always writes 30 cells (629 bytes) with numParams = 29
 
@@ -44,7 +72,10 @@ CELL = {
 }
 C_FILETYPE, C_EXPOSURE, C_DR, C_DRP, C_FILM, C_WB_SOURCE = 2, 5, 6, 7, 8, 11
 FILETYPE_JPEG = 7
-DRP_CELL = {"off": 0, "weak": 1, "strong": 2}   # confirmed from output EXIF; Auto has no known code
+# Confirmed from output EXIF. "plus" (3) is a level only the converter offers: it compresses tones at least
+# as much as strong. Auto has no code; a frame shot with Auto carries the level the camera chose.
+DRP_CELL = {"off": 0, "weak": 1, "strong": 2, "plus": 3}
+EV_THIRDS = range(-6, 10)   # -2..+3 EV in 1/3 steps; the camera silently ignores values outside this
 
 
 @dataclass
@@ -157,15 +188,38 @@ class Adjustment:
         return f"{self.setting}: asked for {self.requested}, rendered with {self.applied} ({self.reason})"
 
 
-def apply_recipe(as_shot: Profile, recipe: dict, exposure_ev: float = 0.0) -> tuple[Profile, list[Adjustment]]:
-    """Return a patched copy of the as-shot profile, plus every deviation from the recipe."""
+def check_exposure(exposure_ev: float) -> int:
+    """Exposure compensation for a conversion, in thirds of a stop."""
+    thirds = round(exposure_ev * 3)
+    if abs(exposure_ev * 3 - thirds) > 0.05 or thirds not in EV_THIRDS:
+        raise RecipeError(f"exposure {exposure_ev:g} EV is not valid for a conversion",
+                          "Use steps of 1/3 EV from -2 to +3, e.g. 0.33, 0.67, 1, -0.33. The camera ignores "
+                          "anything outside -2..+3 when developing.")
+    return thirds
+
+
+def apply_recipe(as_shot: Profile, recipe: dict, exposure_ev: float = 0.0,
+                 d_range_priority: str | None = None) -> tuple[Profile, list[Adjustment]]:
+    """Return a patched copy of the as-shot profile, plus every deviation from the recipe.
+
+    `d_range_priority` (off, weak, strong, plus) replaces the recipe's own for this render only.
+    """
     adjustments: list[Adjustment] = []
-    priority = str(m.get(recipe, "d_range_priority") or "off").lower()
+    asked = str(m.get(recipe, "d_range_priority") or "off").lower()
     writes = m.encode_recipe(recipe)
-    if priority not in DRP_CELL:
+    thirds = check_exposure(exposure_ev)
+    priority = asked if d_range_priority is None else d_range_priority.lower()
+    if d_range_priority is not None:
+        if priority not in DRP_CELL:
+            raise RecipeError(f"d_range_priority {d_range_priority!r} is not a preview level",
+                              f"Use one of: {', '.join(DRP_CELL)}.")
+        if priority != asked:
+            adjustments.append(Adjustment("d_range_priority", asked, priority,
+                                          "chosen with --d-range-priority for this preview; the recipe is unchanged"))
+    elif priority not in DRP_CELL:
         raise RecipeError("d_range_priority auto cannot be previewed",
-                          "The conversion has no encoding for Auto. Preview with weak or strong instead; "
-                          "the recipe itself can still be saved to the camera with auto.")
+                          "The conversion has no encoding for Auto. Add --d-range-priority weak, strong or plus to "
+                          "preview a level; the recipe itself can still be saved to the camera with auto.")
     prof = Profile(bytearray(as_shot.data))
     # A frame shot with D-range priority carries it in its profile; while it is on, the converter
     # ignores dynamic range and tone, so the recipe's value always replaces it.
@@ -205,10 +259,6 @@ def apply_recipe(as_shot: Profile, recipe: dict, exposure_ev: float = 0.0) -> tu
                 f"d_range_priority is {priority}, and while it is on the camera ignores dynamic range and tone"))
     prof.set(C_FILETYPE, FILETYPE_JPEG)
     prof.set(C_WB_SOURCE, 2)   # take white balance from the profile, not from the RAF
-    thirds = round(exposure_ev * 3)
-    if abs(exposure_ev * 3 - thirds) > 0.05 or not -9 <= thirds <= 9:
-        raise RecipeError(f"exposure {exposure_ev:g} EV is not valid",
-                          "Use steps of 1/3 EV from -3 to +3, e.g. 0.33, 0.67, 1, -0.33.")
     prof.set(C_EXPOSURE, round(thirds * 1000 / 3))
     return prof, adjustments
 
@@ -238,8 +288,16 @@ class RawConverter:
         self.as_shot.validate()
         return self.as_shot
 
-    def develop(self, profile: Profile, full: bool = False, timeout_s: float = 90.0) -> bytes:
-        """Write a profile, verify the camera stored it, develop, and return the JPEG bytes."""
+    def develop(self, profile: Profile, full: bool = False, timeout_s: float = 90.0, output: str = "jpeg") -> bytes:
+        """Write a profile, verify the camera stored it, develop, and return the image bytes."""
+        fmt = OUTPUT_FORMATS.get(output)
+        if fmt is None:
+            raise RecipeError(f"unknown output format {output!r}", f"Use one of: {', '.join(OUTPUT_FORMATS)}.")
+        if fmt.full_only and not full:
+            raise RecipeError(f"{fmt.label} output needs full resolution",
+                              "The camera produces TIFF only at full size: add --full.")
+        profile = Profile(bytearray(profile.data))
+        profile.set(C_FILETYPE, fmt.filetype)
         want = profile.host_form()
         self.session.set_raw(PROFILE_PROP, want, "send the conversion settings")
         back = Profile(bytearray(self.session.prop_raw(PROFILE_PROP)))
@@ -267,11 +325,14 @@ class RawConverter:
                 "Do not retry yet. Switch the camera off and on (remove the battery briefly if it "
                 "will not switch off), reconnect, then run the command again.")
         r = Reader(self.session.check(OP_GetObjectInfo, (handle,), what="read the result's description"))
-        _storage, fmt, _prot, size = r.take("I"), r.take("H"), r.take("H"), r.take("I")
-        image = self.session.check(OP_GetObject, (handle,), what="download the result")
+        _storage, got_format, _prot, size = r.take("I"), r.take("H"), r.take("H"), r.take("I")
+        try:
+            image = self.session.check(OP_GetObject, (handle,), what="download the result")
+        finally:
+            self.session.transact(OP_DeleteObject, (handle,))   # remove only the object this conversion produced
         if len(image) != size:
             raise ConversionError(f"the result was cut short ({len(image)} of {size} bytes)", "Run the command again.")
-        if fmt != FORMAT_JPEG or image[:2] != b"\xff\xd8":
-            raise ConversionError(f"the camera returned something other than a JPEG (format 0x{fmt:04X})")
-        self.session.transact(OP_DeleteObject, (handle,))   # remove only the object this conversion produced
+        if got_format != fmt.object_format or not fmt.matches(image):
+            raise ConversionError(f"the camera returned something other than {fmt.label} (format 0x{got_format:04X})",
+                                  "Try --format jpeg; this firmware may not offer that output.")
         return image

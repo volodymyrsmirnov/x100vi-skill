@@ -56,8 +56,25 @@ first use.
   because of how it was shot:
   - dynamic range above the frame's own (a frame shot at DR100 or DR200 cannot be developed at DR400);
   - `dynamic_range: auto`, rendered as 200 or the frame's own value, whichever is lower;
-  - `dynamic_range`, `highlight`, `shadow` ignored because the recipe turns D-range priority on.
+  - `dynamic_range`, `highlight`, `shadow` ignored because the recipe turns D-range priority on;
+  - `d_range_priority` replaced because `--d-range-priority` was given.
+- **"d_range_priority auto cannot be previewed"**: add `--d-range-priority weak`, `strong` or `plus`.
+- **"exposure ... is not valid for a conversion"**: the camera develops only -2 to +3 EV, in 1/3 steps.
 - **Low battery warning**: conversion runs on the camera's battery and USB power saving is off in this mode.
+- **"TIFF previews need --full"**: the camera makes TIFF only at full resolution. Add `--full`, or use
+  `--format jpeg` / `heif` for half-size previews.
+- **"returned something other than ..."**: this firmware did not produce the requested format; use JPEG.
+
+## Settings file problems (`backup --full`, restoring a `.dat`)
+
+- **"not a camera settings file"**: the file was not saved by `x100vi backup --full`. A JSON backup is
+  restored with the same command, but it only covers C1-C7 (and live settings with `--live`).
+- **"from an X-..., not an X100VI"**, **"different size"**: the file comes from another model or other
+  firmware. Restore it only on a matching camera and firmware.
+- **"saved from a different X100VI body"**: it also carries that body's network settings. `--other-body`
+  restores it anyway; only use it when the user explicitly agrees.
+- **"reads back different settings"**: switch the camera off and on, then check its settings. The previous
+  file is saved in the backups folder and can be restored the same way.
 
 ## Things that are normal
 

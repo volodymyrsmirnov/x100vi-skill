@@ -62,16 +62,28 @@ def state_dir() -> Path:
     return Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "x100vi"
 
 
-def save_auto_backup(label: str, content: dict) -> Path:
+def _new_backup_path(label: str, suffix: str) -> Path:
     folder = state_dir() / "backups"
     folder.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    path = folder / f"{stamp}-{label}.json"
+    path = folder / f"{stamp}-{label}{suffix}"
     n = 1
     while path.exists():
         n += 1
-        path = folder / f"{stamp}-{label}-{n}.json"
+        path = folder / f"{stamp}-{label}-{n}{suffix}"
+    return path
+
+
+def save_auto_backup(label: str, content: dict) -> Path:
+    path = _new_backup_path(label, ".json")
     path.write_text(json.dumps(content, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def save_settings_file(label: str, blob: bytes) -> Path:
+    """Keep a copy of the camera's own settings file in the state folder."""
+    path = _new_backup_path(label, ".dat")
+    path.write_bytes(blob)
     return path
 
 

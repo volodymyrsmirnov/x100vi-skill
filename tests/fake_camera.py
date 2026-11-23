@@ -6,7 +6,8 @@ It reproduces the behaviours the client has to cope with:
   * grain Off written as 1 and read back as 6/7; white-balance shift remembered per mode;
     a Kelvin change zeroing the shift; monochromatic tint staying stored under a colour sim;
   * naming a never-named register seeds it from the live settings;
-  * RAF upload, the 0xD185 profile, and conversion producing a JPEG object.
+  * RAF upload, the 0xD185 profile, and conversion producing a JPEG, HEIF or (full size only) TIFF object;
+  * the camera's own settings file as object handle 0, read with GetObject and restored with SendObject.
 """
 from __future__ import annotations
 
@@ -34,6 +35,13 @@ FACTORY = {  # recipe key -> factory wire value
 }
 
 
+def make_settings_file(body_id: str = "0179FAKE000000000001", model: str = "X100VI", size: int = 4096,
+                       fill: int = 0) -> bytes:
+    """A camera settings file with the real header layout and dummy contents."""
+    head = b"FUJIFILMX-BACKUP" + b"0100" + model.encode().ljust(0x20, b"\x00") + body_id.encode().ljust(20, b"\x00")
+    return head + bytes([fill]) * (size - len(head))
+
+
 def make_raf(path: Path, model: str = "X100VI", size: int = 4096) -> Path:
     """A file with a valid RAF header (no image data), enough for upload checks."""
     head = RAF_MAGIC + b"0201" + b"FF179503" + model.encode().ljust(32, b"\x00") + b"0131"
@@ -56,7 +64,10 @@ class FakeX100VI:
         self.selected = 1
         self.usb_mode = 6                 # 0xD16E: 6 is RAW conv./backup restore
         self.profile: bytes | None = None
-        self.objects: dict[int, bytes] = {}
+        self.objects: dict[int, tuple[int, bytes]] = {}   # handle -> (object format, bytes)
+        self.settings_file = make_settings_file()
+        self.settings_writes = 0
+        self._incoming: tuple[int, int] | None = None     # (format, size) announced by SendObjectInfo
         self.next_handle = 1
         self.stall_conversion = False
         self.closed = False
@@ -76,6 +87,7 @@ class FakeX100VI:
             0x1001: self._device_info, 0x1002: self._open, 0x1003: self._close, 0x1007: self._handles,
             0x1008: self._object_info, 0x1009: self._object, 0x100B: self._delete, 0x1015: self._get,
             0x1016: self._set, 0x900C: self._announce, 0x900D: self._upload,
+            0x100C: self._send_object_info, 0x100D: self._send_object,
         }.get(op)
         if handler is None:
             return 0x2005, (), b""
@@ -98,7 +110,8 @@ class FakeX100VI:
 
     def _device_info(self, params, data):
         info = DeviceInfo("FUJIFILM", self.model, self.firmware, "FAKE0001",
-                          [0x1001, 0x1002, 0x1003, 0x1007, 0x1008, 0x1009, 0x100B, 0x1015, 0x1016, 0x900C, 0x900D],
+                          [0x1001, 0x1002, 0x1003, 0x1007, 0x1008, 0x1009, 0x100B, 0x100C, 0x100D, 0x1015, 0x1016,
+                           0x900C, 0x900D],
                           self._props())
         return OK, info.pack()
 
@@ -222,9 +235,18 @@ class FakeX100VI:
         count = (len(self.profile) - TABLE) // 4
         cells = [struct.unpack_from("<i", self.profile, TABLE + 4 * i)[0] for i in range(count)]
         payload = json.dumps({"cells": cells, "full": bool(trigger)}).encode()
+        image = Image.new("RGB", (48, 32) if trigger else (24, 16), (90, 120, 150))
         buf = io.BytesIO()
-        Image.new("RGB", (48, 32) if trigger else (24, 16), (90, 120, 150)).save(buf, "JPEG", comment=payload)
-        self.objects[self.next_handle] = buf.getvalue()
+        filetype = cells[2]
+        if filetype == 18:                                     # HEIF at either size
+            fmt, blob = 0x3812, b"\x00\x00\x00\x18ftypheix" + payload
+        elif filetype in (9, 11) and trigger:                  # TIFF only at full size, as on the body
+            image.save(buf, "TIFF", description=payload.decode())
+            fmt, blob = 0x380D, buf.getvalue()
+        else:                                                  # JPEG, and TIFF requests at half size
+            image.save(buf, "JPEG", comment=payload)
+            fmt, blob = 0x3801, buf.getvalue()
+        self.objects[self.next_handle] = (fmt, blob)
         self.next_handle += 1
         return OK
 
@@ -233,15 +255,44 @@ class FakeX100VI:
         return OK, struct.pack("<I", len(handles)) + b"".join(struct.pack("<I", h) for h in handles)
 
     def _object_info(self, params, data):
-        blob = self.objects.get(params[0])
-        if blob is None:
+        if params[0] == 0 and self.mode == "raw_conv":         # the settings file: a bare 56-byte ObjectInfo
+            return OK, struct.pack("<IHHI", 0, 0x5000, 0, len(self.settings_file)) + bytes(44)
+        entry = self.objects.get(params[0])
+        if entry is None:
             return INVALID_HANDLE, b""
-        info = struct.pack("<IHHIHIIIIIIIHII", 0x10000001, 0x3801, 0, len(blob), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+        fmt, blob = entry
+        info = struct.pack("<IHHIHIIIIIIIHII", 0x10000001, fmt, 0, len(blob), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
         return OK, info + pack_string("DSCF0001.jpg") + pack_string("20261123T080000") + b"\x00\x00"
 
     def _object(self, params, data):
-        blob = self.objects.get(params[0])
-        return (OK, blob) if blob is not None else (INVALID_HANDLE, b"")
+        if params[0] == 0 and self.mode == "raw_conv":
+            return OK, self.settings_file
+        entry = self.objects.get(params[0])
+        return (OK, entry[1]) if entry is not None else (INVALID_HANDLE, b"")
+
+    def _send_object_info(self, params, data):
+        r = Reader(data)
+        r.take("I")
+        fmt = r.take("H")
+        r.take("H")
+        size = r.take("I")
+        if fmt != 0x5000 or len(data) != 1076 or tuple(params) != (0, 0):
+            return GENERAL_ERROR, b""
+        self._incoming = (fmt, size)
+        return OK, b""
+
+    def _send_object(self, params, data):
+        announced, self._incoming = self._incoming, None
+        if announced is None or len(data) != announced[1]:
+            return GENERAL_ERROR, b""
+        if not data.startswith(b"FUJIFILMX-BACKUP") or len(data) != len(self.settings_file):
+            return GENERAL_ERROR, b""
+        stored = bytearray(data)
+        stored[0x108] = (stored[0x108] + 2) & 0xFF        # the body bumps its own counter and flag on restore
+        stored[0x716] = 3
+        self.settings_file = bytes(stored)
+        self.settings_writes += 1
+        return OK, b""
 
     def _delete(self, params, data):
         return (OK, b"") if self.objects.pop(params[0], None) is not None else (INVALID_HANDLE, b"")
@@ -255,4 +306,6 @@ def rendered_cells(jpeg: bytes | Path) -> dict:
     """What the fake 'developed': the profile cells it was triggered with (kept in a JPEG comment)."""
     source = io.BytesIO(jpeg) if isinstance(jpeg, bytes) else jpeg
     with Image.open(source) as im:
+        if im.format == "TIFF":
+            return json.loads(im.tag_v2[270])
         return json.loads(im.info["comment"])
