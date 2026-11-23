@@ -1,5 +1,7 @@
 # x100vi-skill
 
+> 📝 Blog post: [Fujifilm X100VI AI skill: film recipes over USB with Claude Code and Codex](https://volodymyr.smirnov.im/writing/x100vi-skill/)
+
 Create film-simulation recipes for a **Fujifilm X100VI** by describing the look you want, see them
 rendered on your own photos by the camera's processor, and save the ones you like into the camera's
 custom settings (C1-C7), all over a USB cable.
