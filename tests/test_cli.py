@@ -288,3 +288,19 @@ def test_preview_tiff_without_full_fails_before_connecting(raf, capsys):
 
     assert cli.main(["preview", str(raf), "-r", "everyday", "--format", "tiff"], transport_factory=boom) == 2
     assert "--full" in capsys.readouterr().err
+
+
+def test_preview_with_a_d_range_priority_override(run, raf, tmp_path, recipe_file):
+    auto = recipe_file({"name": "AUTO DRP", "d_range_priority": "auto"}, "auto.json")
+    r = run("preview", raf, "-r", auto, "--d-range-priority", "plus", "-o", tmp_path / "p", "--json")
+    assert r.code == 0 and r.json["d_range_priority"] == "plus"
+    assert rendered_cells(tmp_path / "p" / "DSCF0001__auto.jpg")["cells"][7] == 3
+    assert r.json["renders"][0]["not_applied"][0]["applied"] == "plus"
+
+
+def test_preview_exposure_outside_the_converter_range_fails_before_connecting(raf, capsys):
+    def boom():
+        raise AssertionError("must not connect")
+
+    assert cli.main(["preview", str(raf), "-r", "everyday", "--ev", "-3"], transport_factory=boom) == 2
+    assert "-2 to +3" in capsys.readouterr().err

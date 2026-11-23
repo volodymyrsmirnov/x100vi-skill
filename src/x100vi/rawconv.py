@@ -72,7 +72,10 @@ CELL = {
 }
 C_FILETYPE, C_EXPOSURE, C_DR, C_DRP, C_FILM, C_WB_SOURCE = 2, 5, 6, 7, 8, 11
 FILETYPE_JPEG = 7
-DRP_CELL = {"off": 0, "weak": 1, "strong": 2}   # confirmed from output EXIF; Auto has no known code
+# Confirmed from output EXIF. "plus" (3) is a level only the converter offers: it compresses tones at least
+# as much as strong. Auto has no code; a frame shot with Auto carries the level the camera chose.
+DRP_CELL = {"off": 0, "weak": 1, "strong": 2, "plus": 3}
+EV_THIRDS = range(-6, 10)   # -2..+3 EV in 1/3 steps; the camera silently ignores values outside this
 
 
 @dataclass
@@ -185,15 +188,38 @@ class Adjustment:
         return f"{self.setting}: asked for {self.requested}, rendered with {self.applied} ({self.reason})"
 
 
-def apply_recipe(as_shot: Profile, recipe: dict, exposure_ev: float = 0.0) -> tuple[Profile, list[Adjustment]]:
-    """Return a patched copy of the as-shot profile, plus every deviation from the recipe."""
+def check_exposure(exposure_ev: float) -> int:
+    """Exposure compensation for a conversion, in thirds of a stop."""
+    thirds = round(exposure_ev * 3)
+    if abs(exposure_ev * 3 - thirds) > 0.05 or thirds not in EV_THIRDS:
+        raise RecipeError(f"exposure {exposure_ev:g} EV is not valid for a conversion",
+                          "Use steps of 1/3 EV from -2 to +3, e.g. 0.33, 0.67, 1, -0.33. The camera ignores "
+                          "anything outside -2..+3 when developing.")
+    return thirds
+
+
+def apply_recipe(as_shot: Profile, recipe: dict, exposure_ev: float = 0.0,
+                 d_range_priority: str | None = None) -> tuple[Profile, list[Adjustment]]:
+    """Return a patched copy of the as-shot profile, plus every deviation from the recipe.
+
+    `d_range_priority` (off, weak, strong, plus) replaces the recipe's own for this render only.
+    """
     adjustments: list[Adjustment] = []
-    priority = str(m.get(recipe, "d_range_priority") or "off").lower()
+    asked = str(m.get(recipe, "d_range_priority") or "off").lower()
     writes = m.encode_recipe(recipe)
-    if priority not in DRP_CELL:
+    thirds = check_exposure(exposure_ev)
+    priority = asked if d_range_priority is None else d_range_priority.lower()
+    if d_range_priority is not None:
+        if priority not in DRP_CELL:
+            raise RecipeError(f"d_range_priority {d_range_priority!r} is not a preview level",
+                              f"Use one of: {', '.join(DRP_CELL)}.")
+        if priority != asked:
+            adjustments.append(Adjustment("d_range_priority", asked, priority,
+                                          "chosen with --d-range-priority for this preview; the recipe is unchanged"))
+    elif priority not in DRP_CELL:
         raise RecipeError("d_range_priority auto cannot be previewed",
-                          "The conversion has no encoding for Auto. Preview with weak or strong instead; "
-                          "the recipe itself can still be saved to the camera with auto.")
+                          "The conversion has no encoding for Auto. Add --d-range-priority weak, strong or plus to "
+                          "preview a level; the recipe itself can still be saved to the camera with auto.")
     prof = Profile(bytearray(as_shot.data))
     # A frame shot with D-range priority carries it in its profile; while it is on, the converter
     # ignores dynamic range and tone, so the recipe's value always replaces it.
@@ -233,10 +259,6 @@ def apply_recipe(as_shot: Profile, recipe: dict, exposure_ev: float = 0.0) -> tu
                 f"d_range_priority is {priority}, and while it is on the camera ignores dynamic range and tone"))
     prof.set(C_FILETYPE, FILETYPE_JPEG)
     prof.set(C_WB_SOURCE, 2)   # take white balance from the profile, not from the RAF
-    thirds = round(exposure_ev * 3)
-    if abs(exposure_ev * 3 - thirds) > 0.05 or not -9 <= thirds <= 9:
-        raise RecipeError(f"exposure {exposure_ev:g} EV is not valid",
-                          "Use steps of 1/3 EV from -3 to +3, e.g. 0.33, 0.67, 1, -0.33.")
     prof.set(C_EXPOSURE, round(thirds * 1000 / 3))
     return prof, adjustments
 

@@ -133,7 +133,7 @@ Profile cells are signed 32-bit and hold the register wire values. The SDK's own
 | 2 | file type: 7 JPEG, 18 HEIF, 9 / 11 8- / 16-bit TIFF | 12 | WB mode | 21 | lens modulation optimizer |
 | 3 | image size | 13, 14 | WB shift red, blue | 22 | colour space |
 | 4 | image quality | 15 | Kelvin | 23 | mono warm/cool |
-| 5 | exposure, EV x 1000 | 16, 17 | highlight, shadow | 24 | smooth skin |
+| 5 | exposure, EV x 1000 (-2000 to 3000) | 16, 17 | highlight, shadow | 24 | smooth skin |
 | 6 | dynamic range | 18 | colour | 25 | colour chrome FX blue |
 | 7 | D-range priority (0, 1, 2, 3) | 19 | sharpness | 26 | mono magenta/green |
 | 8 | film simulation | 20 | noise reduction | 27 | clarity |
@@ -141,10 +141,14 @@ Profile cells are signed 32-bit and hold the register wire values. The SDK's own
 
 Limits: dynamic range cannot exceed the frame's as-shot value (a higher one is reported to render with a
 green cast); no encoding is known for dynamic range Auto or D-range priority Auto. D-range priority 3 is a
-third fixed level (maker notes: fixed, value 3), not Auto; a frame shot with Auto carries the level the
-camera chose. The file type is honoured only as follows: HEIF at either size (format `0x3812`), TIFF only
-at full resolution (format `0x380D`, uncompressed RGB, about 125 MB at 8-bit and 245 MB at 16-bit); a TIFF
-request at half size returns a JPEG. The X100VI ignores the lens modulation optimizer when developing.
+third fixed level (maker notes: fixed, value 3, "Plus" in ExifTool), not Auto; it compresses tones at
+least as much as strong. A frame shot with Auto carries the level the camera chose. Exposure outside -2 to
++3 EV is accepted but ignored: -2.33 and -3 rendered identical to 0 EV. The lens modulation optimizer is
+honoured when developing (on and off give different pixels).
+
+The file type is honoured as follows: HEIF at either size (format `0x3812`); TIFF only at full resolution
+(format `0x380D`, uncompressed RGB, about 125 MB at 8-bit and 245 MB at 16-bit). A TIFF request at half
+size returns a JPEG.
 
 ## Evidence
 

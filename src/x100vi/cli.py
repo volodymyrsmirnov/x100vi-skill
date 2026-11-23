@@ -260,7 +260,7 @@ def cmd_validate(a, out: Out, tf: TransportFactory) -> int:
 
 def cmd_preview(a, out: Out, tf: TransportFactory) -> int:
     from . import exifcheck
-    from .rawconv import OUTPUT_FORMATS, Profile, RawConverter, apply_recipe, describe, inspect_raf
+    from .rawconv import OUTPUT_FORMATS, Profile, RawConverter, apply_recipe, check_exposure, describe, inspect_raf
     from .sheet import contact_sheet
 
     fmt = OUTPUT_FORMATS[a.format]
@@ -273,15 +273,17 @@ def cmd_preview(a, out: Out, tf: TransportFactory) -> int:
     for ref in a.recipe:
         recipe = library.load_recipe(ref)
         m.encode_recipe(recipe)
-        if str(m.get(recipe, "d_range_priority") or "off").lower() == "auto":
+        if a.d_range_priority is None and str(m.get(recipe, "d_range_priority") or "off").lower() == "auto":
             raise RecipeError(f"{ref}: d_range_priority auto cannot be previewed",
-                              "Preview with weak or strong; the recipe can still be saved to the camera with auto.")
+                              "Add --d-range-priority weak, strong or plus to preview a level; the recipe can "
+                              "still be saved to the camera with auto.")
         label = Path(ref).stem
         while label in [lbl for lbl, _ in recipes]:
             label += "-2"
         recipes.append((label, recipe))
     if not recipes and not a.as_shot:
         raise RecipeError("nothing to render", "Give --recipe FILE [...] and/or --as-shot.")
+    check_exposure(a.ev)               # fail before connecting
     if a.verify:
         exifcheck.require_exiftool()   # fail before connecting, with install help
     out_dir = Path(a.out)
@@ -303,7 +305,7 @@ def cmd_preview(a, out: Out, tf: TransportFactory) -> int:
                 if recipe is None:
                     profile, adjustments = Profile(bytearray(as_shot.data)), []
                 else:
-                    profile, adjustments = apply_recipe(as_shot, recipe, a.ev)
+                    profile, adjustments = apply_recipe(as_shot, recipe, a.ev, a.d_range_priority)
                 image = conv.develop(profile, full=a.full, timeout_s=a.timeout, output=fmt.name)
                 target = out_dir / f"{raf.path.stem}__{label}.{fmt.extension}"
                 target.write_bytes(image)
@@ -314,8 +316,8 @@ def cmd_preview(a, out: Out, tf: TransportFactory) -> int:
                 if a.verify and recipe is not None:
                     effective = dict(recipe)
                     for adj in adjustments:
-                        if adj.setting == "dynamic_range":
-                            effective["dynamic_range"] = adj.applied
+                        if adj.setting in ("dynamic_range", "d_range_priority"):
+                            effective[adj.setting] = adj.applied
                     check = exifcheck.compare(effective, target)
                     entry["verified"] = {"checked": check["checked"], "mismatches": check["mismatches"]}
                     matched = check["checked"] - len(check["mismatches"])
@@ -337,8 +339,11 @@ def cmd_preview(a, out: Out, tf: TransportFactory) -> int:
     lines = _warn_lines(warnings) + lines
     if a.ev:
         lines.append(f"exposure compensation {a.ev:+g} EV applied to every recipe render")
+    if a.d_range_priority:
+        lines.append(f"D-range priority {a.d_range_priority} used for every recipe render")
     out.emit({"renders": renders, "frames": frames, "contact_sheet": str(sheet) if sheet else None,
-              "format": fmt.name, "exposure_ev": a.ev, "full_resolution": a.full, "warnings": warnings}, lines)
+              "format": fmt.name, "exposure_ev": a.ev, "d_range_priority": a.d_range_priority,
+              "full_resolution": a.full, "warnings": warnings}, lines)
     return 0
 
 
@@ -505,7 +510,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--full", action="store_true", help="full resolution instead of half size")
     sp.add_argument("--format", choices=["jpeg", "heif", "tiff", "tiff16"], default="jpeg",
                     help="output file type (default jpeg); tiff and tiff16 need --full")
-    sp.add_argument("--ev", type=float, default=0.0, help="exposure compensation in 1/3 EV steps, -3..+3")
+    sp.add_argument("--ev", type=float, default=0.0, help="exposure compensation in 1/3 EV steps, -2..+3")
+    sp.add_argument("--d-range-priority", choices=["off", "weak", "strong", "plus"],
+                    help="render with this D-range priority instead of the recipe's (plus: a level beyond strong "
+                         "that only the converter offers)")
     sp.add_argument("--no-sheet", dest="sheet", action="store_false", help="do not build a contact sheet")
     sp.add_argument("--verify", action="store_true",
                     help="check each output's EXIF against its recipe (needs exiftool)")

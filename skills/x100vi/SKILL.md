@@ -100,7 +100,10 @@ x100vi preview shot.RAF --as-shot -r desert-gold my-look.json --json
 - `--format heif` gives HEIF files. `--format tiff` / `tiff16` give 8- / 16-bit TIFF and need `--full`
   (about 125 / 245 MB each). Use them only when the user asks for that format; the contact sheet is made
   for JPEG only.
-- `--ev 0.67` applies exposure compensation (1/3 EV steps) when the recipe's notes call for it.
+- `--ev 0.67` applies exposure compensation (1/3 EV steps, -2 to +3) when the recipe's notes call for it.
+- `--d-range-priority weak|strong|plus|off` renders with that D-range priority instead of the recipe's.
+  A recipe with `d_range_priority: auto` can only be previewed this way. `plus` is a level beyond strong
+  that only the converter offers: it cannot be saved to the camera, so never put it in a recipe.
 - **Always report `not_applied`.** Each entry says which setting the render could not honour for this
   particular frame and why, for example a DR400 recipe on a frame shot at DR200. Say it in plain words
   and make clear the recipe itself is unchanged and will behave as written when shooting.

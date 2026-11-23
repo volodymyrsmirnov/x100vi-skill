@@ -56,7 +56,10 @@ first use.
   because of how it was shot:
   - dynamic range above the frame's own (a frame shot at DR100 or DR200 cannot be developed at DR400);
   - `dynamic_range: auto`, rendered as 200 or the frame's own value, whichever is lower;
-  - `dynamic_range`, `highlight`, `shadow` ignored because the recipe turns D-range priority on.
+  - `dynamic_range`, `highlight`, `shadow` ignored because the recipe turns D-range priority on;
+  - `d_range_priority` replaced because `--d-range-priority` was given.
+- **"d_range_priority auto cannot be previewed"**: add `--d-range-priority weak`, `strong` or `plus`.
+- **"exposure ... is not valid for a conversion"**: the camera develops only -2 to +3 EV, in 1/3 steps.
 - **Low battery warning**: conversion runs on the camera's battery and USB power saving is off in this mode.
 - **"TIFF previews need --full"**: the camera makes TIFF only at full resolution. Add `--full`, or use
   `--format jpeg` / `heif` for half-size previews.

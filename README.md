@@ -242,7 +242,11 @@ contact sheet: x100vi-previews/contact-sheet.jpg
   why the camera must be connected and switched on, why it uses the camera's battery, and why the output
   matches an in-camera JPEG.
 - The RAF must come from an X100VI. It is uploaded once and developed once per recipe.
-- Output is half size by default; `--full` gives full resolution. `--ev 0.67` adds exposure compensation.
+- Output is half size by default; `--full` gives full resolution. `--ev 0.67` adds exposure compensation
+  (-2 to +3 EV in 1/3 steps; the camera ignores anything outside that when developing).
+- `--d-range-priority weak|strong|plus|off` previews with that D-range priority instead of the recipe's.
+  It is the way to preview a recipe set to Auto. `plus` is an extra level beyond strong that only the
+  converter offers; the camera cannot shoot with it.
 - `--format heif` makes HEIF files. `--format tiff` (8-bit) and `--format tiff16` need `--full`, because
   the camera makes TIFF only at full resolution: about 125 MB and 245 MB per image. The contact sheet is
   made for JPEG previews only.
