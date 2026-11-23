@@ -13,8 +13,12 @@ It is two things in one repository:
   > I'm going to Dubai and want cool photos of deserts. Show me three options on this RAF and put the
   > best one in C3.
 
+**Previews are developed by the camera itself.** The RAF is sent to the camera over USB, the camera's own
+image processor converts it to a JPEG with the recipe applied, and the JPEG is sent back. Nothing on the
+computer imitates Fujifilm's processing, so what you see is what the camera would have produced.
+
 No firmware is touched. The tool only reads and writes the same camera settings you can change in the
-menu, and uses the same RAW-conversion feature as Fujifilm's X RAW STUDIO.
+menu, and uses the same in-camera RAW conversion that Fujifilm's X RAW Studio uses.
 
 > [!IMPORTANT]
 > **Put the camera in the right USB mode before you connect it.** On the camera:
@@ -29,7 +33,7 @@ menu, and uses the same RAW-conversion feature as Fujifilm's X RAW STUDIO.
 |---|---|
 | Read | The current shooting settings and C1-C7, as JSON recipes. Back them all up to one file. |
 | Write | A recipe to the live settings or to any of C1-C7, including its name. Every write is read back and compared. |
-| Preview | Upload a RAF, have the **camera** develop it with one or more recipes, and get the JPEGs plus a contact sheet. Nothing is stored on the camera. |
+| Preview | Send a RAF to the camera, where the camera's own processor converts it to JPEG with one or more recipes. You get the JPEGs back plus a contact sheet. The conversion happens entirely on the camera; nothing is stored on it afterwards. |
 | Design | With the skill: turn a description, a list of settings, or a recipe web page into a recipe. |
 
 What a recipe controls: film simulation, grain, colour chrome effect, colour chrome FX blue, smooth skin,
@@ -210,6 +214,10 @@ DSCF4103.RAF: shot as classic_chrome, DR200, D-range priority weak
 contact sheet: x100vi-previews/contact-sheet.jpg
 ```
 
+- **The RAW-to-JPEG conversion runs on the camera, not on the computer.** The tool uploads the RAF, tells
+  the camera which settings to use, waits while the camera develops it, and downloads the result. That is
+  why the camera must be connected and switched on, why it uses the camera's battery, and why the output
+  matches an in-camera JPEG.
 - The RAF must come from an X100VI. It is uploaded once and developed once per recipe.
 - Output is half size by default; `--full` gives full resolution. `--ev 0.67` adds exposure compensation.
 - A preview shows colour and tone on a frame you already shot. It cannot show what a different ISO or
@@ -283,8 +291,12 @@ How the camera is addressed, the measured property map and the evidence behind e
   [zgrimz/fujifilm-ptp-reference](https://github.com/zgrimz/fujifilm-ptp-reference).
 - Settings in output files are checked with [ExifTool](https://exiftool.org) by Phil Harvey.
 
-This project is not affiliated with or endorsed by FUJIFILM Corporation. FUJIFILM, X100VI and the film
-simulation names are trademarks of their owner. Use it at your own risk.
+## Disclaimer
+
+This project isn't affiliated with FUJIFILM Corporation. FUJIFILM, X RAW Studio, and camera model names are
+trademarks of FUJIFILM Corporation, used here only to identify the hardware described.
+
+Use it at your own risk.
 
 ## License
 

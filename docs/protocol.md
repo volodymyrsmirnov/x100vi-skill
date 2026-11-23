@@ -20,7 +20,7 @@ specifics were confirmed here.
 |---|---|---|---|
 | Register selector | | `0xD18C` | 1-7 |
 | Register name | | `0xD18D` | PTP string, up to 25 characters |
-| Image size | `0xD16E` | `0xD18E` | 1-3 S, 4-6 M, 7-9 L (3:2, 16:9, 1:1); 10 S 4:3, 12 S 5:4, 14 L 4:3, 16 L 5:4, 18 M 4:3, 20 M 5:4 |
+| Image size | `0xD1A5` | `0xD18E` | 1-3 S, 4-6 M, 7-9 L (3:2, 16:9, 1:1); 10 S 4:3, 12 S 5:4, 14 L 4:3, 16 L 5:4, 18 M 4:3, 20 M 5:4 |
 | Image quality | `0xD018` | `0xD18F` | 1 RAW, 2 FINE, 3 NORMAL, 4 FINE+RAW, 5 NORMAL+RAW |
 | Dynamic range | `0xD007` | `0xD190` | 100, 200, 400, `0xFFFF` auto |
 | D-range priority | `0xD02E` | `0xD191` | 0 off, 1 weak, 2 strong, `0x8000` auto |
@@ -43,8 +43,44 @@ specifics were confirmed here.
 | Colour space | `0xD00A` | `0xD1A4` | 1 sRGB, 2 Adobe RGB |
 | Battery | `0xD36B` | | string, first field is percent |
 
-Not identified: register property `0xD1A5` (read-only, 7) and film-simulation value `0x8000`, which the
-registers accept and the live property rejects.
+The custom-register block is `0xD18C` (selector), `0xD18D` (name) and the 23 settings `0xD18E`-`0xD1A4`.
+`0xD1A5`, which sits right after it, is the **live** image size, not a register setting. It accepts the
+image-size codes only while live image quality is not RAW.
+
+## Exposed by the camera but not used
+
+In this mode the X100VI advertises 61 properties and 20 operations. The client uses 52 of the properties:
+the 51 that carry settings, names, the conversion and the battery, plus the USB-mode indicator. That
+indicator and the nine unused ones:
+
+| Code | What it is | Status |
+|---|---|---|
+| `0xD16E` | USB mode, read-only: 6 in this mode (5 tether, 8 webcam on other bodies) | read to confirm the mode |
+| `0xD184` | Conversion profile codes, `FF179503,FA179503` | understood; informational |
+| `0xD186`, `0xD187` | Model key `X100VI_0100`, which X RAW Studio uses to match saved profiles | understood; informational |
+| `0xD212` | Event list; signals when a conversion has finished | understood; the client polls object handles instead |
+| `0xD36A` | Battery, coarse level (10, later 9, as the percentage fell from 43 to 40) | `0xD36B` is used instead |
+| `0xD20B` | Device name, an empty string here | understood; not needed |
+| `0xD17B` | Answers GeneralError to a read | unknown |
+| `0xD208` | Reads `0x0304` | unknown |
+| `0xD21C` | Reads 1 | unknown |
+
+Film-simulation value `0x8000` is accepted by the registers and rejected by the live property; its meaning
+is unknown and the client never writes it.
+
+Operations not used: `0x1017` ResetDevicePropValue; `0x901D`, a second vendor upload; and the standard
+`0x100C`/`0x100D` SendObjectInfo/SendObject. The last two belong to the other half of this mode's name,
+**settings backup and restore**: the camera exposes a backup of all its settings as one object, which
+other projects report reading and writing on other bodies. That is not implemented or tested here. It
+would be the only route to settings outside the recipe (autofocus, buttons, set-up menu), as an opaque
+blob.
+
+Conversion profile cells not used: 0 and 1 (shooting condition), 28 (reported elsewhere as the digital
+tele-converter), 29 (host-write only), and the non-JPEG values of cell 2 (reported elsewhere: 9 and 11 for
+8- and 16-bit TIFF, 18 for HEIF; untested on the X100VI).
+
+In USB CARD READER mode the camera advertises only `0x5001` (battery), `0xD303`, `0xD406` and `0xD407`; the
+last three are unknown.
 
 ## Behaviour the client depends on
 
@@ -100,3 +136,7 @@ green cast); no encoding is known for dynamic range Auto or D-range priority Aut
 
 `tests/fake_camera.py` reproduces these behaviours in software so the client is tested without hardware;
 `tests/hardware/` repeats the essential checks on a real body.
+
+---
+
+This project isn't affiliated with FUJIFILM Corporation. FUJIFILM, X RAW Studio, and camera model names are trademarks of FUJIFILM Corporation, used here only to identify the hardware described.
