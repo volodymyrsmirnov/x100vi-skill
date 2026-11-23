@@ -122,10 +122,35 @@ class WpdTransport:
             values.SetIPortableDevicePropVariantCollectionValue(self._key(MTP_EXT, P_OPERATION_PARAMS), collection)
         return values
 
+    def _out(self, method, *args, outs=(ctypes.c_ulong,)):
+        """Call a getter whose results comtypes may return, or may expect as caller-supplied pointers
+        (PortableDeviceTypes declares some [out] parameters as [in])."""
+        try:
+            return method(*args)
+        except TypeError as e:
+            if "required argument" not in str(e):
+                raise
+        slots = [kind() for kind in outs]
+        method(*args, *(ctypes.byref(slot) for slot in slots))
+        values = [slot.value if hasattr(slot, "value") else slot for slot in slots]
+        return values[0] if len(values) == 1 else tuple(values)
+
+    def _uint(self, values, fmtid: str, pid: int) -> int:
+        return int(self._out(values.GetUnsignedIntegerValue, self._key(fmtid, pid)))
+
+    def _uint64(self, values, pid: int) -> int:
+        return int(self._out(values.GetUnsignedLargeIntegerValue, self._key(MTP_EXT, pid), outs=(ctypes.c_ulonglong,)))
+
+    def _string(self, values, pid: int) -> str:
+        return str(self._out(values.GetStringValue, self._key(MTP_EXT, pid), outs=(ctypes.c_wchar_p,)))
+
+    def count(self, values) -> int:
+        return int(self._out(values.GetCount))
+
     def _send(self, values, what: str):
         try:
             results = self.device.SendCommand(0, values)
-            hr = results.GetErrorValue(self._key(COMMON, C_HRESULT))
+            hr = int(self._out(results.GetErrorValue, self._key(COMMON, C_HRESULT), outs=(ctypes.c_long,)))
         except self._comtypes.COMError as e:
             raise CameraNotRespondingError(f"Windows reported an error during {what} ({e})") from e
         if hr < 0:
@@ -137,7 +162,8 @@ class WpdTransport:
         values.SetBufferValue(self._key(MTP_EXT, pid), ctypes.cast(buf, ctypes.POINTER(ctypes.c_ubyte)), len(data))
 
     def _get_buffer(self, values, pid: int) -> bytes:
-        pointer, length = values.GetBufferValue(self._key(MTP_EXT, pid))
+        pointer, length = self._out(values.GetBufferValue, self._key(MTP_EXT, pid),
+                                    outs=(ctypes.POINTER(ctypes.c_ubyte), ctypes.c_ulong))
         try:
             return ctypes.string_at(pointer, length)
         finally:
@@ -153,19 +179,19 @@ class WpdTransport:
         if op in DATA_IN_OPS:
             return self._read(op, params, what)
         results = self._send(self._command(CMD_WITHOUT_DATA, op, params), what)
-        return results.GetUnsignedIntegerValue(self._key(MTP_EXT, P_RESPONSE_CODE)), (), b""
+        return self._uint(results, MTP_EXT, P_RESPONSE_CODE), (), b""
 
     def _chunk(self, results) -> int:
         try:
-            size = results.GetUnsignedIntegerValue(self._key(MTP_EXT, P_OPTIMAL_BUFFER))
+            size = self._uint(results, MTP_EXT, P_OPTIMAL_BUFFER)
         except self._comtypes.COMError:
             size = 0
         return size or DEFAULT_CHUNK
 
     def _read(self, op: int, params: tuple, what: str) -> tuple[int, tuple, bytes]:
         start = self._send(self._command(CMD_DATA_TO_READ, op, params), what)
-        context = start.GetStringValue(self._key(MTP_EXT, P_CONTEXT))
-        total = start.GetUnsignedLargeIntegerValue(self._key(MTP_EXT, P_TOTAL_SIZE))
+        context = self._string(start, P_CONTEXT)
+        total = self._uint64(start, P_TOTAL_SIZE)
         chunk = self._chunk(start)
         parts, got = [], 0
         while got < total:
@@ -186,7 +212,7 @@ class WpdTransport:
         values = self._command(CMD_DATA_TO_WRITE, op, params)
         values.SetUnsignedLargeIntegerValue(self._key(MTP_EXT, P_TOTAL_SIZE), len(data))
         start = self._send(values, what)
-        context = start.GetStringValue(self._key(MTP_EXT, P_CONTEXT))
+        context = self._string(start, P_CONTEXT)
         chunk = self._chunk(start)
         view, pos = memoryview(data), 0
         while pos < len(data):
@@ -196,7 +222,7 @@ class WpdTransport:
             values.SetUnsignedIntegerValue(self._key(MTP_EXT, P_BYTES_TO_WRITE), len(piece))
             self._set_buffer(values, P_DATA, piece)
             results = self._send(values, what)
-            written = results.GetUnsignedIntegerValue(self._key(MTP_EXT, P_BYTES_WRITTEN))
+            written = self._uint(results, MTP_EXT, P_BYTES_WRITTEN)
             if not 0 < written <= len(piece):
                 raise CameraNotRespondingError(
                     f"Windows accepted {written} of {len(piece)} bytes during {what} "
@@ -208,7 +234,7 @@ class WpdTransport:
         values = self._command(CMD_END)
         values.SetStringValue(self._key(MTP_EXT, P_CONTEXT), context)
         results = self._send(values, what)
-        return results.GetUnsignedIntegerValue(self._key(MTP_EXT, P_RESPONSE_CODE))
+        return self._uint(results, MTP_EXT, P_RESPONSE_CODE)
 
     def close(self) -> None:
         with contextlib.suppress(Exception):   # the device may already be gone

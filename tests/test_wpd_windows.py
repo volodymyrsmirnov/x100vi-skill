@@ -1,4 +1,5 @@
 """Windows Portable Devices: runs on Windows only (CI has no camera, so it checks the COM plumbing)."""
+import ctypes
 import sys
 
 import pytest
@@ -48,17 +49,17 @@ def test_command_values_carry_everything_the_transport_sends(wpd):
     )
 
     values = wpd._command(CMD_DATA_TO_READ, 0x1015, (0xD16E, 7))
-    assert values.GetCount() == 4
-    assert values.GetUnsignedIntegerValue(wpd._key(COMMON, C_ID)) == CMD_DATA_TO_READ
-    assert values.GetUnsignedIntegerValue(wpd._key(MTP_EXT, P_OPERATION_CODE)) == 0x1015
+    assert wpd.count(values) == 4
+    assert wpd._uint(values, COMMON, C_ID) == CMD_DATA_TO_READ
+    assert wpd._uint(values, MTP_EXT, P_OPERATION_CODE) == 0x1015
 
     values = wpd._command(CMD_READ)
     values.SetStringValue(wpd._key(MTP_EXT, P_CONTEXT), "ctx-1")
     values.SetUnsignedIntegerValue(wpd._key(MTP_EXT, P_BYTES_TO_READ), 4096)
     values.SetUnsignedLargeIntegerValue(wpd._key(MTP_EXT, P_TOTAL_SIZE), 250_000_000)
     wpd._set_buffer(values, P_DATA, b"\x01\x02\x03PTP")
-    assert values.GetStringValue(wpd._key(MTP_EXT, P_CONTEXT)) == "ctx-1"
-    assert values.GetUnsignedLargeIntegerValue(wpd._key(MTP_EXT, P_TOTAL_SIZE)) == 250_000_000
+    assert wpd._string(values, P_CONTEXT) == "ctx-1"
+    assert wpd._uint64(values, P_TOTAL_SIZE) == 250_000_000
     assert wpd._get_buffer(values, P_DATA) == b"\x01\x02\x03PTP"
 
 
@@ -66,5 +67,6 @@ def test_operation_parameters_are_stored_as_ui4(wpd):
     from x100vi.wpd import CMD_WITHOUT_DATA, MTP_EXT, P_OPERATION_PARAMS
 
     values = wpd._command(CMD_WITHOUT_DATA, 0x100B, (0xFFFFFFFF, 2))
-    collection = values.GetIPortableDevicePropVariantCollectionValue(wpd._key(MTP_EXT, P_OPERATION_PARAMS))
-    assert collection.GetCount() == 2
+    collection = wpd._out(values.GetIPortableDevicePropVariantCollectionValue, wpd._key(MTP_EXT, P_OPERATION_PARAMS),
+                          outs=(lambda: ctypes.POINTER(wpd._types.IPortableDevicePropVariantCollection)(),))
+    assert wpd.count(collection) == 2
