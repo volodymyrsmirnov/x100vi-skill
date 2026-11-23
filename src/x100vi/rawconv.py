@@ -6,7 +6,10 @@ This is the FUJIFILM X RAW STUDIO flow (camera in USB RAW CONV./BACKUP RESTORE m
   GetDevicePropValue 0xD185                    profile describing the RAF's as-shot settings
   SetDevicePropValue 0xD185                    patched profile, 629-byte host-write form
   SetDevicePropValue 0xD183 = 0 | 1            develop: half size | full resolution
-  GetObjectHandles / GetObject / DeleteObject  fetch the JPEG and remove it from the buffer
+  GetObjectHandles / GetObject / DeleteObject  fetch the image and remove it from the buffer
+
+Profile cell 2 picks the output: JPEG 7, HEIF 18, TIFF 8-bit 9, TIFF 16-bit 11 (codes from X RAW STUDIO's
+profile keywords). The body produces TIFF only at full resolution; at half size it returns a JPEG.
 
 Sequence and profile layout follow github.com/zgrimz/fujifilm-ptp-reference (docs 05, 06).
 The profile cells hold the same wire values as the custom-register properties in model.py.
@@ -29,6 +32,31 @@ PROP_TRIGGER = 0xD183
 FORMAT_RAF = 0xF802
 FORMAT_JPEG = 0x3801
 RAF_MAGIC = b"FUJIFILMCCD-RAW "
+
+
+@dataclass(frozen=True)
+class OutputFormat:
+    name: str
+    filetype: int          # profile cell 2
+    object_format: int     # PTP ObjectFormat of the developed image
+    extension: str
+    full_only: bool        # the body ignores the file type at half size
+    label: str
+
+    def matches(self, image: bytes) -> bool:
+        if self.extension == "jpg":
+            return image[:2] == b"\xff\xd8"
+        if self.extension == "heif":
+            return image[4:8] == b"ftyp"
+        return image[:4] in (b"II*\x00", b"MM\x00*")
+
+
+OUTPUT_FORMATS = {f.name: f for f in (
+    OutputFormat("jpeg", 7, FORMAT_JPEG, "jpg", False, "JPEG"),
+    OutputFormat("heif", 18, 0x3812, "heif", False, "HEIF"),
+    OutputFormat("tiff", 9, 0x380D, "tif", True, "8-bit TIFF"),
+    OutputFormat("tiff16", 11, 0x380D, "tif", True, "16-bit TIFF"),
+)}
 
 TABLE = 0x1FD        # cell i lives at TABLE + 4*i, signed 32-bit little endian
 HOST_CELLS = 30      # X RAW STUDIO always writes 30 cells (629 bytes) with numParams = 29
@@ -238,8 +266,16 @@ class RawConverter:
         self.as_shot.validate()
         return self.as_shot
 
-    def develop(self, profile: Profile, full: bool = False, timeout_s: float = 90.0) -> bytes:
-        """Write a profile, verify the camera stored it, develop, and return the JPEG bytes."""
+    def develop(self, profile: Profile, full: bool = False, timeout_s: float = 90.0, output: str = "jpeg") -> bytes:
+        """Write a profile, verify the camera stored it, develop, and return the image bytes."""
+        fmt = OUTPUT_FORMATS.get(output)
+        if fmt is None:
+            raise RecipeError(f"unknown output format {output!r}", f"Use one of: {', '.join(OUTPUT_FORMATS)}.")
+        if fmt.full_only and not full:
+            raise RecipeError(f"{fmt.label} output needs full resolution",
+                              "The camera produces TIFF only at full size: add --full.")
+        profile = Profile(bytearray(profile.data))
+        profile.set(C_FILETYPE, fmt.filetype)
         want = profile.host_form()
         self.session.set_raw(PROFILE_PROP, want, "send the conversion settings")
         back = Profile(bytearray(self.session.prop_raw(PROFILE_PROP)))
@@ -267,11 +303,14 @@ class RawConverter:
                 "Do not retry yet. Switch the camera off and on (remove the battery briefly if it "
                 "will not switch off), reconnect, then run the command again.")
         r = Reader(self.session.check(OP_GetObjectInfo, (handle,), what="read the result's description"))
-        _storage, fmt, _prot, size = r.take("I"), r.take("H"), r.take("H"), r.take("I")
-        image = self.session.check(OP_GetObject, (handle,), what="download the result")
+        _storage, got_format, _prot, size = r.take("I"), r.take("H"), r.take("H"), r.take("I")
+        try:
+            image = self.session.check(OP_GetObject, (handle,), what="download the result")
+        finally:
+            self.session.transact(OP_DeleteObject, (handle,))   # remove only the object this conversion produced
         if len(image) != size:
             raise ConversionError(f"the result was cut short ({len(image)} of {size} bytes)", "Run the command again.")
-        if fmt != FORMAT_JPEG or image[:2] != b"\xff\xd8":
-            raise ConversionError(f"the camera returned something other than a JPEG (format 0x{fmt:04X})")
-        self.session.transact(OP_DeleteObject, (handle,))   # remove only the object this conversion produced
+        if got_format != fmt.object_format or not fmt.matches(image):
+            raise ConversionError(f"the camera returned something other than {fmt.label} (format 0x{got_format:04X})",
+                                  "Try --format jpeg; this firmware may not offer that output.")
         return image

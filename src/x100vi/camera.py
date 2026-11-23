@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 from . import model as m
+from . import settingsfile
 from .errors import MODE_MENU, RAW_CONV_MODE, PTPError, RecipeError, UnsupportedCameraError, WrongModeError
 from .ptp import PTPSession, Transport, UsbTransport, pack_string
 
@@ -201,6 +202,36 @@ class Camera:
             if stored != recipe.get("name", ""):
                 raise RecipeError(f"the camera stored the name as {stored!r}")
         return log
+
+    # -- the camera's own settings file ------------------------------------------------------
+    def read_settings_file(self) -> bytes:
+        """Every menu setting plus C1-C7, as the body exports it (see settingsfile.py)."""
+        self.require_ready()
+        return settingsfile.read(self.session)
+
+    def restore_settings_file(self, blob: bytes, allow_other_body: bool = False, current: bytes | None = None) -> None:
+        """Write a settings file back after checking it fits this body.
+
+        `current` is the camera's file as just read (pass it when the caller saved a copy first).
+        """
+        self.require_ready()
+        new = settingsfile.parse_header(blob)
+        if current is None:
+            current = self.read_settings_file()
+        here = settingsfile.parse_header(current)
+        if new.model != here.model:
+            raise RecipeError(f"this settings file is from an {new.model or 'unknown camera'}, not an {here.model}",
+                              "Only a file saved from the same camera model can be restored.")
+        if len(blob) != len(current):
+            raise RecipeError(
+                f"this settings file has a different size ({len(blob)} bytes) from the camera's own "
+                f"({len(current)} bytes)",
+                "It was probably saved under different firmware. Restore it only after updating the camera to "
+                "the firmware it was saved with.")
+        if new.body_id != here.body_id and not allow_other_body:
+            raise RecipeError("this settings file was saved from a different X100VI body",
+                              "It also carries that body's network settings. Add --other-body to restore it anyway.")
+        settingsfile.write(self.session, blob)
 
     def clear_wb_memory(self, slot: int) -> None:
         """Zero the shift remembered for every white-balance mode of a register."""

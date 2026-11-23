@@ -172,9 +172,39 @@ def test_a_conversion_that_never_finishes_times_out_without_retrying(camera, fak
 
 
 def test_only_the_new_object_is_fetched_and_deleted(camera, fake, raf):
-    fake.objects[40] = b"\xff\xd8leftover\xff\xd9"   # e.g. left behind by an earlier, interrupted run
+    fake.objects[40] = (0x3801, b"\xff\xd8leftover\xff\xd9")   # e.g. left behind by an earlier, interrupted run
     fake.next_handle = 41
     conv = RawConverter(camera)
     shot = conv.upload(raf.read_bytes())
     assert rendered_cells(conv.develop(shot))["cells"][8] == 11
     assert list(fake.objects) == [40]
+
+
+@pytest.mark.parametrize(("output", "full", "magic", "filetype"), [
+    ("jpeg", False, b"\xff\xd8", 7), ("heif", False, b"\x00\x00\x00\x18ftyp", 18),
+    ("tiff", True, b"II*\x00", 9), ("tiff16", True, b"II*\x00", 11)])
+def test_output_formats_set_the_file_type_cell(camera, fake, raf, output, full, magic, filetype):
+    conv = RawConverter(camera)
+    shot = conv.upload(raf.read_bytes())
+    image = conv.develop(shot, full=full, output=output)
+    assert image.startswith(magic)
+    assert not fake.objects and shot.get(2) == 7     # the as-shot profile is left alone
+
+
+def test_tiff_needs_full_resolution(camera, raf):
+    conv = RawConverter(camera)
+    shot = conv.upload(raf.read_bytes())
+    with pytest.raises(RecipeError, match="full resolution"):
+        conv.develop(shot, output="tiff")
+
+
+def test_a_body_that_ignores_the_file_type_is_reported(camera, fake, raf, monkeypatch):
+    from x100vi import rawconv
+
+    conv = RawConverter(camera)
+    shot = conv.upload(raf.read_bytes())
+    # pretend half-size TIFF were allowed: the body answers with a JPEG, which must not be saved as TIFF
+    monkeypatch.setitem(rawconv.OUTPUT_FORMATS, "tiff", rawconv.OutputFormat("tiff", 9, 0x380D, "tif", False, "TIFF"))
+    with pytest.raises(ConversionError, match="other than TIFF"):
+        conv.develop(shot, output="tiff")
+    assert not fake.objects

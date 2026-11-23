@@ -12,7 +12,7 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
-from . import __version__, library
+from . import __version__, library, settingsfile
 from . import model as m
 from .camera import open_camera
 from .errors import MODE_MENU, RecipeError, SlotOccupiedError, X100VIError
@@ -143,7 +143,25 @@ def cmd_set(a, out: Out, tf: TransportFactory) -> int:
     return 0
 
 
+PRIVATE_NOTE = "Keep it private: the file also holds the camera's ID and network settings."
+
+
 def cmd_backup(a, out: Out, tf: TransportFactory) -> int:
+    if a.full:
+        with open_camera(tf() if tf else None) as cam:
+            blob = cam.read_settings_file()
+        header = settingsfile.parse_header(blob)
+        if a.output:
+            path = Path(a.output)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(blob)
+        else:
+            path = library.save_settings_file("camera-settings", blob)
+        out.emit({"saved": str(path), "kind": "camera_settings_file", "bytes": len(blob), "model": header.model,
+                  "note": PRIVATE_NOTE},
+                 [f"saved the camera's settings file ({len(blob)} bytes: every menu setting and C1-C7) to {path}",
+                  f"note: {PRIVATE_NOTE}"])
+        return 0
     with open_camera(tf() if tf else None) as cam:
         data = cam.backup()
     if a.output:
@@ -158,7 +176,39 @@ def cmd_backup(a, out: Out, tf: TransportFactory) -> int:
     return 0
 
 
+def _restore_settings_file(a, blob: bytes, out: Out, tf: TransportFactory) -> int:
+    settingsfile.parse_header(blob, a.file)
+    if a.live:
+        raise RecipeError("--live does not apply to a camera settings file",
+                          "A settings file always restores everything: menus, live settings and C1-C7.")
+    if not a.yes:
+        raise RecipeError(f"restore would replace every setting on the camera (menus, live settings and C1-C7) "
+                          f"with {a.file}", "Add --yes to go ahead. The camera's current settings file is saved first.")
+    with open_camera(tf() if tf else None) as cam:
+        current = cam.read_settings_file()
+        if not settingsfile.settings_differ(current, blob):
+            out.emit({"restored": False, "unchanged": True},
+                     ["the camera already holds exactly these settings; nothing was written"])
+            return 0
+        previous = library.save_settings_file("before-restore", current)
+        cam.restore_settings_file(blob, a.other_body, current=current)
+        mismatch = settingsfile.settings_differ(cam.read_settings_file(), blob)
+    if mismatch:
+        raise X100VIError(f"the camera accepted the settings file but reads back {len(mismatch)} different bytes",
+                          f"Its previous settings are saved in {previous}. Switch the camera off and on, then "
+                          "check the settings on the body.")
+    out.emit({"restored": True, "verified": True, "previous_saved_to": str(previous)},
+             [f"restored every setting from {a.file} and read it back to confirm",
+              f"previous settings saved to {previous}"])
+    return 0
+
+
 def cmd_restore(a, out: Out, tf: TransportFactory) -> int:
+    path = Path(a.file)
+    if path.is_file():
+        with path.open("rb") as fh:
+            if fh.read(len(settingsfile.MAGIC)) == settingsfile.MAGIC:
+                return _restore_settings_file(a, path.read_bytes(), out, tf)
     data = library.load_recipe(a.file)
     if "slots" not in data or not isinstance(data["slots"], dict):
         raise RecipeError(f"{a.file} is not a backup made by `x100vi backup`",
@@ -210,9 +260,14 @@ def cmd_validate(a, out: Out, tf: TransportFactory) -> int:
 
 def cmd_preview(a, out: Out, tf: TransportFactory) -> int:
     from . import exifcheck
-    from .rawconv import Profile, RawConverter, apply_recipe, describe, inspect_raf
+    from .rawconv import OUTPUT_FORMATS, Profile, RawConverter, apply_recipe, describe, inspect_raf
     from .sheet import contact_sheet
 
+    fmt = OUTPUT_FORMATS[a.format]
+    if fmt.full_only and not a.full:
+        raise RecipeError(f"{fmt.label} previews need --full",
+                          "The camera makes TIFF only at full resolution (about 125 MB per image for 8-bit, "
+                          "245 MB for 16-bit). Add --full, or use --format jpeg or heif for half-size previews.")
     rafs = [inspect_raf(p) for p in a.rafs]
     recipes: list[tuple[str, dict]] = []
     for ref in a.recipe:
@@ -249,8 +304,8 @@ def cmd_preview(a, out: Out, tf: TransportFactory) -> int:
                     profile, adjustments = Profile(bytearray(as_shot.data)), []
                 else:
                     profile, adjustments = apply_recipe(as_shot, recipe, a.ev)
-                image = conv.develop(profile, full=a.full, timeout_s=a.timeout)
-                target = out_dir / f"{raf.path.stem}__{label}.jpg"
+                image = conv.develop(profile, full=a.full, timeout_s=a.timeout, output=fmt.name)
+                target = out_dir / f"{raf.path.stem}__{label}.{fmt.extension}"
                 target.write_bytes(image)
                 entry = {"raf": str(raf.path), "recipe": label, "file": str(target),
                          "not_applied": [adj.as_dict() for adj in adjustments]}
@@ -274,13 +329,16 @@ def cmd_preview(a, out: Out, tf: TransportFactory) -> int:
             frames.append({"raf": str(raf.path), "as_shot": shot})
     sheet = None
     if a.sheet and sum(len(r) for r in rows) > 1:
-        sheet = contact_sheet(rows, out_dir / "contact-sheet.jpg")
-        lines.append(f"contact sheet: {sheet}")
+        if fmt.name == "jpeg":
+            sheet = contact_sheet(rows, out_dir / "contact-sheet.jpg")
+            lines.append(f"contact sheet: {sheet}")
+        else:
+            lines.append(f"no contact sheet: it is made only for JPEG previews, not {fmt.label}")
     lines = _warn_lines(warnings) + lines
     if a.ev:
         lines.append(f"exposure compensation {a.ev:+g} EV applied to every recipe render")
     out.emit({"renders": renders, "frames": frames, "contact_sheet": str(sheet) if sheet else None,
-              "exposure_ev": a.ev, "full_resolution": a.full, "warnings": warnings}, lines)
+              "format": fmt.name, "exposure_ev": a.ev, "full_resolution": a.full, "warnings": warnings}, lines)
     return 0
 
 
@@ -423,13 +481,18 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--dry-run", action="store_true", help="validate and show the plan without connecting")
     sp.add_argument("--no-backup", action="store_true", help="do not save the previous contents first")
 
-    sp = add("backup", cmd_backup, "save the live settings and C1-C7 to a JSON file")
+    sp = add("backup", cmd_backup, "save the live settings and C1-C7 to a JSON file, or (--full) every setting")
     sp.add_argument("-o", "--output", help="file to write (default: a timestamped file in the state folder)")
+    sp.add_argument("--full", action="store_true",
+                    help="save the camera's own settings file instead: every menu setting plus C1-C7")
 
-    sp = add("restore", cmd_restore, "write a backup's C1-C7 back to the camera")
+    sp = add("restore", cmd_restore,
+             "write a backup back to the camera: C1-C7 from a JSON backup, or everything from a --full file")
     sp.add_argument("file")
-    sp.add_argument("--live", action="store_true", help="also restore the live shooting settings")
-    sp.add_argument("--yes", action="store_true", help="confirm overwriting the camera's custom settings")
+    sp.add_argument("--live", action="store_true", help="JSON backups: also restore the live shooting settings")
+    sp.add_argument("--yes", action="store_true", help="confirm overwriting the camera's settings")
+    sp.add_argument("--other-body", action="store_true",
+                    help="allow a settings file saved from a different X100VI body")
 
     sp = add("validate", cmd_validate, "check recipe files without a camera")
     sp.add_argument("files", nargs="+")
@@ -440,6 +503,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--as-shot", action="store_true", help="also render each RAF with its own settings")
     sp.add_argument("-o", "--out", default="x100vi-previews", help="output folder (default: ./x100vi-previews)")
     sp.add_argument("--full", action="store_true", help="full resolution instead of half size")
+    sp.add_argument("--format", choices=["jpeg", "heif", "tiff", "tiff16"], default="jpeg",
+                    help="output file type (default jpeg); tiff and tiff16 need --full")
     sp.add_argument("--ev", type=float, default=0.0, help="exposure compensation in 1/3 EV steps, -3..+3")
     sp.add_argument("--no-sheet", dest="sheet", action="store_false", help="do not build a contact sheet")
     sp.add_argument("--verify", action="store_true",

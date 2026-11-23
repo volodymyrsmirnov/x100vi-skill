@@ -33,9 +33,9 @@ menu, and uses the same in-camera RAW conversion that Fujifilm's X RAW Studio us
 
 | | |
 |---|---|
-| Read | The current shooting settings and C1-C7, as JSON recipes. Back them all up to one file. |
+| Read | The current shooting settings and C1-C7, as JSON recipes. Back them all up to one file, or save the camera's own settings file with every menu setting. |
 | Write | A recipe to the live settings or to any of C1-C7, including its name. Every write is read back and compared. |
-| Preview | Send a RAF to the camera, where the camera's own processor converts it to JPEG with one or more recipes. You get the JPEGs back plus a contact sheet. The conversion happens entirely on the camera; nothing is stored on it afterwards. |
+| Preview | Send a RAF to the camera, where the camera's own processor converts it with one or more recipes, to JPEG (with a contact sheet), HEIF or TIFF. The conversion happens entirely on the camera; nothing is stored on it afterwards. |
 | Design | With the skill: turn a description, a list of settings, or a recipe web page into a recipe. |
 
 What a recipe controls: film simulation, grain, colour chrome effect, colour chrome FX blue, smooth skin,
@@ -184,8 +184,10 @@ x100vi get C3 -o c3.json                     # one custom setting to a file
 x100vi set C3 my-look.json                   # save a recipe (refuses if C3 is occupied)
 x100vi set C3 my-look.json --overwrite       # replace it; the old one is saved first
 x100vi set live desert-gold                  # apply a starter recipe to the current settings
-x100vi backup -o my-camera.json              # everything in one file
+x100vi backup -o my-camera.json              # live settings and C1-C7 as JSON
 x100vi restore my-camera.json --yes          # write C1-C7 back
+x100vi backup --full -o camera.dat           # the camera's own settings file: every menu setting too
+x100vi restore camera.dat --yes              # put every setting back
 x100vi preview shot.RAF --as-shot -r desert-gold street-mono my-look.json
 x100vi sandbox-help                          # how to let an agent reach the camera from its sandbox
 ```
@@ -241,6 +243,9 @@ contact sheet: x100vi-previews/contact-sheet.jpg
   matches an in-camera JPEG.
 - The RAF must come from an X100VI. It is uploaded once and developed once per recipe.
 - Output is half size by default; `--full` gives full resolution. `--ev 0.67` adds exposure compensation.
+- `--format heif` makes HEIF files. `--format tiff` (8-bit) and `--format tiff16` need `--full`, because
+  the camera makes TIFF only at full resolution: about 125 MB and 245 MB per image. The contact sheet is
+  made for JPEG previews only.
 - A preview shows colour and tone on a frame you already shot. It cannot show what a different ISO or
   exposure at capture would have done.
 
@@ -254,6 +259,10 @@ contact sheet: x100vi-previews/contact-sheet.jpg
 - **Your recipes are not overwritten silently.** `set` refuses an occupied custom setting unless you pass
   `--overwrite`, and saves the previous contents first. `restore` needs `--yes` and backs up first.
   Automatic backups live in `~/.local/state/x100vi/backups`.
+- **Full settings files are checked before they are restored**: they must come from an X100VI, match the
+  size the camera's firmware uses, and come from the same body (`--other-body` overrides the last check).
+  The camera's current file is saved first and the restore is read back. Keep these files private: they
+  contain the camera's ID and network settings.
 - **Untested firmware** produces a warning, not a refusal; verification still applies.
 - A RAW conversion that never finishes can leave the camera unresponsive until it is switched off and
   on. The tool never retries one on its own and tells you when to power-cycle.

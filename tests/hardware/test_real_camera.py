@@ -83,3 +83,23 @@ def test_develops_a_raf_and_the_output_carries_the_recipe(tmp_path):
                     if adj.setting == "dynamic_range":
                         effective["dynamic_range"] = adj.applied
                 assert exifcheck.compare(effective, out)["mismatches"] == []
+
+
+def test_reads_the_settings_file_twice_identically():
+    from x100vi import settingsfile
+
+    with open_camera() as cam:
+        first, second = cam.read_settings_file(), cam.read_settings_file()
+    header = settingsfile.parse_header(first)
+    assert first == second and header.model == "X100VI" and len(first) > 10_000
+
+
+@pytest.mark.skipif(not RAF, reason="set X100VI_TEST_RAF to an X100VI .RAF file")
+def test_develops_heif_and_full_size_tiff():
+    with open_camera() as cam:
+        conv = RawConverter(cam)
+        shot = conv.upload(Path(RAF).read_bytes())
+        heif = conv.develop(shot, output="heif")
+        assert heif[4:8] == b"ftyp" and len(heif) > 500_000
+        tiff = conv.develop(shot, full=True, output="tiff")
+        assert tiff[:4] == b"II*\x00" and len(tiff) > 100_000_000

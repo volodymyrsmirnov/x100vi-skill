@@ -97,6 +97,9 @@ x100vi preview shot.RAF --as-shot -r desert-gold my-look.json --json
 - Output goes to `./x100vi-previews/` (`-o DIR` to change): one JPEG per RAF and recipe, plus
   `contact-sheet.jpg`. Show the contact sheet to the user; open individual files when they want detail.
 - Previews are half size. Add `--full` only when the user wants a full-resolution file.
+- `--format heif` gives HEIF files. `--format tiff` / `tiff16` give 8- / 16-bit TIFF and need `--full`
+  (about 125 / 245 MB each). Use them only when the user asks for that format; the contact sheet is made
+  for JPEG only.
 - `--ev 0.67` applies exposure compensation (1/3 EV steps) when the recipe's notes call for it.
 - **Always report `not_applied`.** Each entry says which setting the render could not honour for this
   particular frame and why, for example a DR400 recipe on a frame shot at DR200. Say it in plain words
@@ -123,13 +126,21 @@ x100vi get C2            # one custom setting, as a recipe
 x100vi get live          # current shooting settings
 x100vi backup -o my-camera.json     # live + C1-C7 in one file
 x100vi restore my-camera.json --yes # writes C1-C7 back; ask the user before running this
+x100vi backup --full -o camera.dat  # the camera's own settings file: every menu setting plus C1-C7
+x100vi restore camera.dat --yes     # replaces EVERY setting on the camera; ask first
 ```
+
+Use `--full` when the user wants everything saved, for example before a trip or a firmware update. Tell
+them the file is private: it holds the camera's ID and network settings. Restoring a `--full` file
+replaces all menus, the live settings and C1-C7. It is refused for another model, other firmware or
+another body; `--other-body` overrides only the last check and needs the user's explicit yes.
 
 ## Rules
 
 - **Ask before every write to the camera** (`set`, `restore`), unless the user already asked for exactly
   that write. Reading, validating and previewing need no confirmation.
-- **Never pass `--overwrite` or `restore --yes` on your own judgment.** They replace the user's saved looks.
+- **Never pass `--overwrite`, `restore --yes` or `--other-body` on your own judgment.** They replace the
+  user's saved looks or settings.
 - Do not invent settings. The camera accepts only what the schema lists; `validate` is the authority.
 - One program at a time: `x100vi` cannot share the camera with X RAW STUDIO, Image Capture or Lightroom.
 - RAF files must come from an X100VI. JPEGs cannot be previewed.

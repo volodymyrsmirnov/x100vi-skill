@@ -3,7 +3,8 @@
 Everything here was measured on an X100VI running firmware 1.31, over USB, in
 **CONNECTION MODE = USB RAW CONV./BACKUP RESTORE**. The RAW-conversion sequence and profile layout come
 from [zgrimz/fujifilm-ptp-reference](https://github.com/zgrimz/fujifilm-ptp-reference); the X100VI
-specifics were confirmed here.
+specifics were confirmed here. Codes and value tables were also cross-checked against FUJIFILM X RAW STUDIO
+1.28 for macOS, by reading its files without running it; every code and value below agrees with it.
 
 ## Transport
 
@@ -61,23 +62,39 @@ indicator and the nine unused ones:
 | `0xD212` | Event list; signals when a conversion has finished | understood; the client polls object handles instead |
 | `0xD36A` | Battery, coarse level (10, later 9, as the percentage fell from 43 to 40) | `0xD36B` is used instead |
 | `0xD20B` | Device name, an empty string here | understood; not needed |
-| `0xD17B` | Answers GeneralError to a read | unknown |
-| `0xD208` | Reads `0x0304` | unknown |
-| `0xD21C` | Reads 1 | unknown |
+| `0xD17B` | Power control: writing 1 switches the camera off (answers GeneralError to a read) | never written |
+| `0xD208` | Release (shutter) mode for tethered shooting; reads `0x0304` | not usable in this mode |
+| `0xD21C` | Device error status, read after a failed command; reads 1 | not needed |
 
 Film-simulation value `0x8000` is accepted by the registers and rejected by the live property; its meaning
 is unknown and the client never writes it.
 
-Operations not used: `0x1017` ResetDevicePropValue; `0x901D`, a second vendor upload; and the standard
-`0x100C`/`0x100D` SendObjectInfo/SendObject. The last two belong to the other half of this mode's name,
-**settings backup and restore**: the camera exposes a backup of all its settings as one object, which
-other projects report reading and writing on other bodies. That is not implemented or tested here. It
-would be the only route to settings outside the recipe (autofocus, buttons, set-up menu), as an opaque
-blob.
+Operations not used: `0x1017` ResetDevicePropValue and `0x901D`, a second vendor upload.
 
-Conversion profile cells not used: 0 and 1 (shooting condition), 28 (reported elsewhere as the digital
-tele-converter), 29 (host-write only), and the non-JPEG values of cell 2 (reported elsewhere: 9 and 11 for
-8- and 16-bit TIFF, 18 for HEIF; untested on the X100VI).
+Conversion profile cells not used: 1 (shooting condition), 28 (digital tele-converter: 1 on, 2 off) and
+29 (portrait enhancer, host-write only; not on the X100VI).
+
+## Settings file (backup and restore)
+
+The other half of this mode's name. The camera serves its complete configuration (every menu setting plus
+C1-C7) as PTP object handle 0, the same file Fujifilm's backup tools save:
+
+1. `GetObjectInfo` `0x1008` (handle 0): a 56-byte ObjectInfo, format `0x5000`, size 70,524 bytes on
+   firmware 1.31.
+2. `GetObject` `0x1009` (handle 0): the file. It starts with `FUJIFILMX-BACKUP`, then a 4-character version
+   (`0100`), the model name (32 bytes from offset `0x14`) and a 20-character body ID at `0x34` that
+   contains the start of the USB serial number. Two reads in a row are byte-identical.
+3. Restore: `SendObjectInfo` `0x100C` with parameters (0, 0) and a 1076-byte ObjectInfo that is all zero
+   except format `0x5000` and the size, then `SendObject` `0x100D` with parameter 0 and the file.
+
+Restoring the file that was just read takes about a second. Afterwards C1-C7 and the live settings are
+unchanged, and the file reads back identical except for two bytes the camera keeps for itself: a 16-bit
+counter at `0x108` that went up by 2, and a flag at `0x716` that went from 1 to 3. Neither changed during
+20 minutes of reads and conversions. Verification ignores those bytes.
+
+The file is not compressed or encrypted, and it includes network settings, so the tool treats it as
+private and opaque: `x100vi restore` checks the header, the model, the size and the body ID, and never
+edits the contents.
 
 In USB CARD READER mode the camera advertises only `0x5001` (battery), `0xD303`, `0xD406` and `0xD407`; the
 last three are unknown.
@@ -106,21 +123,28 @@ last three are unknown.
 5. Re-read and compare, then `0xD183 = 0` (half size) or `1` (full resolution).
 6. Poll `GetObjectHandles` for a new object, `GetObject`, `DeleteObject`.
 
-Profile cells are signed 32-bit at fixed offset `0x1FD` and hold the register wire values:
+Profile cells are signed 32-bit and hold the register wire values. The SDK's own layout is `numParams`
+(u16), the IOPCode string in a fixed `0x1FF`-byte field, then cells from `0x201`. The client counts from
+`0x1FD`, so its cell 0 is the last word of the string field (always 0) and its cell *n* is the SDK's cell
+*n* - 1:
 
 | Cell | Setting | Cell | Setting | Cell | Setting |
 |---|---|---|---|---|---|
-| 2 | file type (7 JPEG) | 12 | WB mode | 21 | lens modulation optimizer |
+| 2 | file type: 7 JPEG, 18 HEIF, 9 / 11 8- / 16-bit TIFF | 12 | WB mode | 21 | lens modulation optimizer |
 | 3 | image size | 13, 14 | WB shift red, blue | 22 | colour space |
 | 4 | image quality | 15 | Kelvin | 23 | mono warm/cool |
 | 5 | exposure, EV x 1000 | 16, 17 | highlight, shadow | 24 | smooth skin |
 | 6 | dynamic range | 18 | colour | 25 | colour chrome FX blue |
-| 7 | D-range priority (0, 1, 2) | 19 | sharpness | 26 | mono magenta/green |
+| 7 | D-range priority (0, 1, 2, 3) | 19 | sharpness | 26 | mono magenta/green |
 | 8 | film simulation | 20 | noise reduction | 27 | clarity |
 | 9 | grain (1 = off) | 10 | colour chrome effect | 11 | WB source (1 as shot, 2 profile) |
 
 Limits: dynamic range cannot exceed the frame's as-shot value (a higher one is reported to render with a
-green cast); no encoding is known for dynamic range Auto or D-range priority Auto.
+green cast); no encoding is known for dynamic range Auto or D-range priority Auto. D-range priority 3 is a
+third fixed level (maker notes: fixed, value 3), not Auto; a frame shot with Auto carries the level the
+camera chose. The file type is honoured only as follows: HEIF at either size (format `0x3812`), TIFF only
+at full resolution (format `0x380D`, uncompressed RGB, about 125 MB at 8-bit and 245 MB at 16-bit); a TIFF
+request at half size returns a JPEG. The X100VI ignores the lens modulation optimizer when developing.
 
 ## Evidence
 
@@ -133,6 +157,10 @@ green cast); no encoding is known for dynamic range Auto or D-range priority Aut
   136 of 136 tags. D-range priority weak and strong were confirmed the same way.
 - **Restore**: after all tests the seven registers were byte-identical to a snapshot taken before the
   first write.
+- **Settings file**: read twice (identical), restored, and read back (identical apart from the two
+  bookkeeping bytes); C1-C7 and the live settings matched before and after.
+- **Output formats**: one frame developed as HEIF and as full-size 8- and 16-bit TIFF; each carried the
+  Fujifilm maker notes.
 
 `tests/fake_camera.py` reproduces these behaviours in software so the client is tested without hardware;
 `tests/hardware/` repeats the essential checks on a real body.

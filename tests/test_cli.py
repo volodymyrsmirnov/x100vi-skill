@@ -271,3 +271,20 @@ def test_recipe_advice_is_specific():
 
 def test_summary_is_readable():
     assert library.summarize(GOLD) == "classic_chrome, WB daylight R+3 B-5, DR400, clarity +2"
+
+
+def test_preview_formats(run, raf, tmp_path):
+    r = run("preview", raf, "-r", "everyday", "desert-gold", "--format", "heif", "-o", tmp_path / "h", "--json")
+    assert r.code == 0 and r.json["format"] == "heif" and r.json["contact_sheet"] is None
+    names = sorted(p.name for p in (tmp_path / "h").iterdir())
+    assert names == ["DSCF0001__desert-gold.heif", "DSCF0001__everyday.heif"]
+    r = run("preview", raf, "-r", "everyday", "--format", "tiff16", "--full", "-o", tmp_path / "t")
+    assert r.code == 0 and rendered_cells(tmp_path / "t" / "DSCF0001__everyday.tif")["cells"][2] == 11
+
+
+def test_preview_tiff_without_full_fails_before_connecting(raf, capsys):
+    def boom():
+        raise AssertionError("must not connect")
+
+    assert cli.main(["preview", str(raf), "-r", "everyday", "--format", "tiff"], transport_factory=boom) == 2
+    assert "--full" in capsys.readouterr().err
