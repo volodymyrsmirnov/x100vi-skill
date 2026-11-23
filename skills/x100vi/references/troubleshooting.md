@@ -1,0 +1,69 @@
+# Troubleshooting
+
+Start with `x100vi doctor`. Every error prints a `hint`; the table adds what usually lies behind it.
+
+| Exit | `error` | What happened | What to tell the user |
+|---|---|---|---|
+| 10 | `camera_not_found` | No Fujifilm device on USB | Use a data cable (some USB-C cables only charge), switch the camera on, wake it if it slept. If the camera is in USB WEBCAM mode it is not reachable. |
+| 11 | `wrong_usb_mode` | The camera is in USB CARD READER or another mode | On the camera: MENU > NETWORK/USB SETTING > CONNECTION MODE > USB RAW CONV./BACKUP RESTORE, then unplug and replug. The X100VI has no tether mode; this is the only mode that exposes settings. |
+| 12 | `unsupported_camera` | A different Fujifilm body is connected | Only the X100VI is supported. Other bodies use different property codes; writing to them is refused on purpose. |
+| 13 | `camera_busy` | Another program has claimed the camera | Quit FUJIFILM X RAW STUDIO, X Acquire, Image Capture, Photos, Lightroom, Capture One. On Linux, unmount the camera in the file manager. On Windows, see below. |
+| 2 | `invalid_recipe` | A recipe value or command argument is not acceptable | The message names the setting and the allowed values. Nothing was sent to the camera. |
+| 4 | `slot_occupied` | The custom setting already holds a recipe | Ask whether to replace it or use another slot. `--overwrite` saves the old contents first. |
+| 5 | `missing_dependency` | `exiftool` is not installed | Only `verify` and `preview --verify` need it. |
+| 20 | `conversion_failed` | The RAF could not be developed | See the next section. |
+| 30 | `camera_refused` | The camera answered a request with an error | Run `x100vi doctor`; if it persists, power-cycle the camera. |
+
+## The tool will not install or run
+
+The skill runs the tool through `scripts/x100vi.sh` (Windows: `scripts/x100vi.ps1`), which installs it on
+first use.
+
+- **Exit 127, "neither uv nor pipx is available"**: install uv from
+  https://docs.astral.sh/uv/getting-started/installation/ and run the command again.
+- **The install itself fails** (no network, no git): the installer's own error is shown. Fix that, or
+  install by hand: `uv tool install git+https://github.com/volodymyrsmirnov/x100vi-skill`.
+- **"installed but cannot be found"**: uv's tool folder is not on PATH; `uv tool update-shell` adds it.
+- **A command or option is unknown**: the installed tool is older than the skill. Run the launcher with
+  `--self-update`.
+- `X100VI_SOURCE` overrides where the launcher installs from (a path to a checkout, or another git URL).
+
+## Preview problems
+
+- **"was shot on a ..., not an X100VI"**: the camera only develops RAFs from its own model.
+- **"is a JPEG"**: previews need the RAW file. Shoot RAW or RAW+JPEG.
+- **"did not accept this RAF"**: the file is truncated, edited, or not a real X100VI RAF.
+- **"produced no image within 90 s"**: the conversion did not finish. Do not retry. Switch the camera off
+  and on (take the battery out briefly if it will not switch off), reconnect, then try again.
+- **A setting listed under `not_applied`**: not an error. That frame cannot show that setting, usually
+  because of how it was shot:
+  - dynamic range above the frame's own (a frame shot at DR100 or DR200 cannot be developed at DR400);
+  - `dynamic_range: auto`, rendered as 200 or the frame's own value, whichever is lower;
+  - `dynamic_range`, `highlight`, `shadow` ignored because the recipe turns D-range priority on.
+- **Low battery warning**: conversion runs on the camera's battery and USB power saving is off in this mode.
+
+## Things that are normal
+
+- The camera screen shows a USB connection screen and its controls are locked while connected in this mode.
+- `get live` omits `image_size` while the camera shoots RAW only.
+- White-balance shift is remembered per white-balance mode by the camera. A recipe sets the shift of the
+  mode it uses.
+- Saving a recipe resets look settings it does not mention to their defaults. Use `--partial` to change
+  only some settings.
+- Automatic backups are kept in `~/.local/state/x100vi/backups` (Windows: `%LOCALAPPDATA%\x100vi\backups`;
+  override with `X100VI_HOME`).
+
+## Platforms
+
+- **macOS**: works out of the box. The system's `ptpcamerad` grabs cameras; the tool ends it before
+  connecting and macOS restarts it on demand.
+- **Linux**: expected to work, not tested on hardware. The desktop may auto-mount the camera (gvfs):
+  unmount it first. Your user needs access to the USB device: a udev rule for vendor `04cb`, or `sudo`.
+- **Windows**: not tested on hardware. libusb can only reach the camera through the WinUSB driver, which
+  you install for the camera with [Zadig](https://zadig.akeo.ie). While WinUSB is installed, Explorer and
+  X RAW STUDIO no longer see the camera; uninstall the driver in Device Manager to switch back.
+
+## What is never done
+
+The tool sends only standard PTP property reads and writes plus the RAW-conversion upload that X RAW STUDIO
+uses. It does not update firmware and has no code path that could.

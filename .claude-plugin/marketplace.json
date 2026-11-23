@@ -1,0 +1,16 @@
+{
+  "name": "x100vi-skill",
+  "owner": {
+    "name": "Volodymyr Smirnov"
+  },
+  "metadata": {
+    "description": "Film-simulation recipes for the Fujifilm X100VI: design, preview on the camera's own processor, and save to C1-C7 over USB."
+  },
+  "plugins": [
+    {
+      "name": "x100vi",
+      "source": "./",
+      "description": "Create, preview and manage film-simulation recipes on a Fujifilm X100VI over USB."
+    }
+  ]
+}

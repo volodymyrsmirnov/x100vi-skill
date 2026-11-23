@@ -1,0 +1,279 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Fujifilm X100VI recipe (film-simulation preset)",
+  "description": "One look for the Fujifilm X100VI, writable to the live shooting settings or to a custom setting C1-C7. Look settings that are missing take the factory default unless the recipe is applied with --partial. image_quality, image_size, lens_modulation_optimizer and color_space are never defaulted: they are written only when present. ISO, exposure compensation, focus and drive settings cannot be set over USB; put them in notes.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "name": {
+      "type": "string",
+      "maxLength": 25,
+      "pattern": "^[ -~]*$",
+      "description": "Name shown on the camera for a custom setting (ignored for live). Plain ASCII, up to 25 characters."
+    },
+    "description": {
+      "type": "string",
+      "description": "What the look is for. Never sent to the camera."
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Free-form labels. Never sent to the camera."
+    },
+    "source": {
+      "type": "string",
+      "description": "Where the recipe came from (URL or author). Never sent to the camera."
+    },
+    "notes": {
+      "type": "string",
+      "description": "Anything to remember when shooting, such as ISO or exposure compensation. Never sent to the camera."
+    },
+    "film_simulation": {
+      "enum": [
+        "provia",
+        "velvia",
+        "astia",
+        "pro_neg_hi",
+        "pro_neg_std",
+        "monochrome",
+        "monochrome_ye",
+        "monochrome_r",
+        "monochrome_g",
+        "sepia",
+        "classic_chrome",
+        "acros",
+        "acros_ye",
+        "acros_r",
+        "acros_g",
+        "eterna",
+        "classic_neg",
+        "eterna_bleach_bypass",
+        "nostalgic_neg",
+        "reala_ace"
+      ],
+      "default": "provia"
+    },
+    "monochromatic": {
+      "type": "object",
+      "description": "Monochromatic colour; only with a monochrome_* or acros_* film simulation.",
+      "additionalProperties": false,
+      "properties": {
+        "warm_cool": {
+          "type": "integer",
+          "minimum": -18,
+          "maximum": 18,
+          "default": 0
+        },
+        "magenta_green": {
+          "type": "integer",
+          "minimum": -18,
+          "maximum": 18,
+          "default": 0
+        }
+      }
+    },
+    "grain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "strength"
+      ],
+      "properties": {
+        "strength": {
+          "enum": [
+            "off",
+            "weak",
+            "strong"
+          ],
+          "default": "off"
+        },
+        "size": {
+          "enum": [
+            "small",
+            "large"
+          ],
+          "default": "small"
+        }
+      }
+    },
+    "color_chrome_effect": {
+      "enum": [
+        "off",
+        "weak",
+        "strong"
+      ],
+      "default": "off"
+    },
+    "color_chrome_fx_blue": {
+      "enum": [
+        "off",
+        "weak",
+        "strong"
+      ],
+      "default": "off"
+    },
+    "smooth_skin": {
+      "enum": [
+        "off",
+        "weak",
+        "strong"
+      ],
+      "default": "off"
+    },
+    "white_balance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "enum": [
+            "auto",
+            "auto_white_priority",
+            "auto_ambience_priority",
+            "daylight",
+            "shade",
+            "fluorescent_1",
+            "fluorescent_2",
+            "fluorescent_3",
+            "incandescent",
+            "underwater",
+            "kelvin",
+            "custom_1",
+            "custom_2",
+            "custom_3"
+          ],
+          "default": "auto"
+        },
+        "kelvin": {
+          "type": "integer",
+          "minimum": 2500,
+          "maximum": 10000,
+          "multipleOf": 10,
+          "description": "Required when, and only allowed when, mode is kelvin."
+        },
+        "shift_r": {
+          "type": "integer",
+          "minimum": -9,
+          "maximum": 9,
+          "default": 0
+        },
+        "shift_b": {
+          "type": "integer",
+          "minimum": -9,
+          "maximum": 9,
+          "default": 0
+        }
+      }
+    },
+    "dynamic_range": {
+      "enum": [
+        "auto",
+        "100",
+        "200",
+        "400",
+        100,
+        200,
+        400
+      ],
+      "default": "100"
+    },
+    "d_range_priority": {
+      "enum": [
+        "off",
+        "weak",
+        "strong",
+        "auto"
+      ],
+      "default": "off",
+      "description": "When not off the camera ignores dynamic_range, highlight and shadow."
+    },
+    "highlight": {
+      "type": "number",
+      "minimum": -2,
+      "maximum": 4,
+      "multipleOf": 0.5,
+      "default": 0
+    },
+    "shadow": {
+      "type": "number",
+      "minimum": -2,
+      "maximum": 4,
+      "multipleOf": 0.5,
+      "default": 0
+    },
+    "color": {
+      "type": "integer",
+      "minimum": -4,
+      "maximum": 4,
+      "default": 0
+    },
+    "sharpness": {
+      "type": "integer",
+      "minimum": -4,
+      "maximum": 4,
+      "default": 0
+    },
+    "noise_reduction": {
+      "type": "integer",
+      "minimum": -4,
+      "maximum": 4,
+      "default": 0,
+      "description": "High ISO NR."
+    },
+    "clarity": {
+      "type": "integer",
+      "minimum": -5,
+      "maximum": 5,
+      "default": 0
+    },
+    "image_quality": {
+      "enum": [
+        "raw",
+        "fine",
+        "normal",
+        "fine_raw",
+        "normal_raw"
+      ],
+      "description": "Optional; left as-is on the camera when absent."
+    },
+    "image_size": {
+      "enum": [
+        "l_3:2",
+        "l_16:9",
+        "l_1:1",
+        "l_4:3",
+        "l_5:4",
+        "m_3:2",
+        "m_16:9",
+        "m_1:1",
+        "m_4:3",
+        "m_5:4",
+        "s_3:2",
+        "s_16:9",
+        "s_1:1",
+        "s_4:3",
+        "s_5:4"
+      ],
+      "description": "Optional; not allowed with image_quality raw."
+    },
+    "lens_modulation_optimizer": {
+      "enum": [
+        "on",
+        "off"
+      ],
+      "description": "Optional."
+    },
+    "color_space": {
+      "enum": [
+        "srgb",
+        "adobe_rgb"
+      ],
+      "description": "Optional."
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/volodymyrsmirnov/x100vi-skill/main/src/x100vi/recipe.schema.json"
+}

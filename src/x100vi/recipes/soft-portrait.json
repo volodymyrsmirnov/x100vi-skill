@@ -1,0 +1,27 @@
+{
+  "$schema": "https://raw.githubusercontent.com/volodymyrsmirnov/x100vi-skill/main/src/x100vi/recipe.schema.json",
+  "source": "x100vi-skill starter recipe (original; not an emulation of any film stock)",
+  "name": "SOFT PORTRAIT",
+  "description": "Gentle skin tones and low contrast for people, indoors or in open shade.",
+  "tags": [
+    "portrait",
+    "people",
+    "skin",
+    "soft",
+    "family"
+  ],
+  "notes": "Exposure compensation +1/3. Works best with the aperture wide open.",
+  "film_simulation": "pro_neg_std",
+  "dynamic_range": "200",
+  "smooth_skin": "weak",
+  "white_balance": {
+    "mode": "auto",
+    "shift_r": 1,
+    "shift_b": -1
+  },
+  "highlight": -1,
+  "shadow": -1,
+  "color": 1,
+  "sharpness": -2,
+  "noise_reduction": 0
+}

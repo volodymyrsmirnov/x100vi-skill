@@ -1,0 +1,34 @@
+{
+  "$schema": "https://raw.githubusercontent.com/volodymyrsmirnov/x100vi-skill/main/src/x100vi/recipe.schema.json",
+  "source": "x100vi-skill starter recipe (original; not an emulation of any film stock)",
+  "name": "STREET MONO",
+  "description": "Punchy black and white with dark skies, hard shadows and coarse grain.",
+  "tags": [
+    "black and white",
+    "monochrome",
+    "street",
+    "contrast",
+    "grain",
+    "documentary"
+  ],
+  "notes": "Exposure compensation -1/3. The red filter darkens blue sky and lightens skin.",
+  "film_simulation": "acros_r",
+  "monochromatic": {
+    "warm_cool": 0,
+    "magenta_green": 0
+  },
+  "dynamic_range": "200",
+  "grain": {
+    "strength": "strong",
+    "size": "large"
+  },
+  "white_balance": {
+    "mode": "auto",
+    "shift_r": 0,
+    "shift_b": 0
+  },
+  "highlight": 1,
+  "shadow": 2,
+  "sharpness": 1,
+  "noise_reduction": -4
+}

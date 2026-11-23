@@ -1,0 +1,33 @@
+{
+  "$schema": "https://raw.githubusercontent.com/volodymyrsmirnov/x100vi-skill/main/src/x100vi/recipe.schema.json",
+  "source": "x100vi-skill starter recipe (original; not an emulation of any film stock)",
+  "name": "WARM MONO",
+  "description": "Quiet, slightly warm-toned black and white with soft contrast. For portraits and interiors.",
+  "tags": [
+    "black and white",
+    "monochrome",
+    "warm tone",
+    "soft",
+    "portrait"
+  ],
+  "notes": "Exposure compensation 0 to +1/3.",
+  "film_simulation": "monochrome",
+  "monochromatic": {
+    "warm_cool": 3,
+    "magenta_green": 0
+  },
+  "dynamic_range": "200",
+  "grain": {
+    "strength": "weak",
+    "size": "small"
+  },
+  "white_balance": {
+    "mode": "auto",
+    "shift_r": 0,
+    "shift_b": 0
+  },
+  "highlight": -1,
+  "shadow": 0,
+  "sharpness": -1,
+  "noise_reduction": -2
+}

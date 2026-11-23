@@ -1,0 +1,10 @@
+{
+  "name": "x100vi",
+  "description": "Create, preview and manage film-simulation recipes on a Fujifilm X100VI over USB.",
+  "version": "0.1.0",
+  "author": { "name": "Volodymyr Smirnov" },
+  "homepage": "https://github.com/volodymyrsmirnov/x100vi-skill",
+  "repository": "https://github.com/volodymyrsmirnov/x100vi-skill",
+  "license": "MIT",
+  "keywords": ["fujifilm", "x100vi", "photography", "film simulation", "recipe"]
+}

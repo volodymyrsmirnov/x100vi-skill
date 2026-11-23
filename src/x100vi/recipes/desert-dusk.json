@@ -1,0 +1,34 @@
+{
+  "$schema": "https://raw.githubusercontent.com/volodymyrsmirnov/x100vi-skill/main/src/x100vi/recipe.schema.json",
+  "source": "x100vi-skill starter recipe (original; not an emulation of any film stock)",
+  "name": "DESERT DUSK",
+  "description": "Soft pastel dunes at sunrise and sunset: lifted shadows, gentle contrast, amber light.",
+  "tags": [
+    "desert",
+    "golden hour",
+    "sunset",
+    "sunrise",
+    "pastel",
+    "soft",
+    "travel"
+  ],
+  "notes": "Exposure compensation 0 to +1/3. ISO auto up to 6400 so DR400 can engage.",
+  "film_simulation": "nostalgic_neg",
+  "dynamic_range": "400",
+  "grain": {
+    "strength": "weak",
+    "size": "small"
+  },
+  "color_chrome_effect": "weak",
+  "white_balance": {
+    "mode": "kelvin",
+    "kelvin": 6300,
+    "shift_r": 2,
+    "shift_b": -3
+  },
+  "highlight": -1.5,
+  "shadow": -1,
+  "color": 1,
+  "sharpness": -1,
+  "noise_reduction": -4
+}
