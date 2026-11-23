@@ -19,8 +19,8 @@ type fakeWPD struct {
 	chunk     uint32
 	chunks    [][]byte
 	pad       bool
-	noCount   bool // NUM_BYTES_READ missing
-	overCount int  // NUM_BYTES_READ larger than the buffer, from this read on (1-based; 0: never)
+	noCountAt int // NUM_BYTES_READ missing from this read (1-based; 0: never)
+	overCount int // NUM_BYTES_READ larger than the buffer, from this read on (1-based; 0: never)
 
 	startCtx   string
 	startErr   error
@@ -39,7 +39,7 @@ func (f *fakeWPD) startRead(what string, op uint16, params []uint32) (string, ui
 	return f.startCtx, f.chunk, f.total, f.startErr
 }
 
-func (f *fakeWPD) readChunk(what, ctx string, want uint32) ([]byte, int, error) {
+func (f *fakeWPD) readChunk(what, ctx string, want uint32) ([]byte, uint32, error) {
 	f.reads++
 	f.wants = append(f.wants, want)
 	if f.reads == f.readErrAt {
@@ -55,12 +55,13 @@ func (f *fakeWPD) readChunk(what, ctx string, want uint32) ([]byte, int, error) 
 		buf = make([]byte, want)
 		copy(buf, part)
 	}
-	n := len(part)
-	if f.noCount {
-		n = -1
+	if f.reads == f.noCountAt {
+		// What wpdTransport.readChunk does when the results lack the count.
+		return nil, 0, errNoByteCount(what, errors.New("element not found"))
 	}
+	n := uint32(len(part))
 	if f.overCount > 0 && f.reads >= f.overCount {
-		n = len(buf) + 1
+		n = uint32(len(buf) + 1)
 	}
 	return buf, n, nil
 }
@@ -116,12 +117,11 @@ func checkEndedOnce(t *testing.T, f *fakeWPD) {
 func TestWPDReadOfKnownSize(t *testing.T) {
 	payload := pattern(2500)
 	for _, tc := range []struct {
-		name    string
-		pad     bool
-		noCount bool
-	}{{"exact buffers", false, false}, {"padded buffers", true, false}, {"no byte count", false, true}} {
+		name string
+		pad  bool
+	}{{"exact buffers", false}, {"padded buffers", true}} {
 		f := &fakeWPD{startCtx: "ctx", total: uint64(len(payload)), chunk: 1000, chunks: split(payload, 1000),
-			pad: tc.pad, noCount: tc.noCount}
+			pad: tc.pad}
 		code, data, err := wpdRead(f, "request 0x1009", 0x1009, []uint32{1})
 		if err != nil || code != ptp.RCOK || !bytes.Equal(data, payload) {
 			t.Fatalf("%s: %#x, %d bytes, %v", tc.name, code, len(data), err)
@@ -207,6 +207,10 @@ func TestWPDReadEndsTheTransferOnEveryFailure(t *testing.T) {
 			"1001 bytes read"},
 		{"unknown size chunk", &fakeWPD{startCtx: "ctx", total: wpdUnknownSize64, chunk: 1000,
 			chunks: split(pattern(3000), 1000), readErrAt: 3}, "read failed"},
+		{"no byte count", &fakeWPD{startCtx: "ctx", total: 3000, chunk: 1000, chunks: split(pattern(3000), 1000),
+			noCountAt: 2}, "did not report how many bytes it read"},
+		{"no byte count, unknown size", &fakeWPD{startCtx: "ctx", total: wpdUnknownSize64, chunk: 1000,
+			chunks: split(pattern(3000), 1000), pad: true, noCountAt: 1}, "did not report how many bytes it read"},
 	} {
 		_, data, err := wpdRead(tc.f, "request 0x1009", 0x1009, nil)
 		if !errs.Is(err, errs.NotResponding) || !strings.Contains(err.Error(), tc.want) || data != nil {
@@ -215,6 +219,23 @@ func TestWPDReadEndsTheTransferOnEveryFailure(t *testing.T) {
 		}
 		checkEndedOnce(t, tc.f)
 	}
+}
+
+// A READ_DATA without NUM_BYTES_READ fails the request: the buffer may keep the requested size, so
+// its length says nothing about how much of it is data.
+func TestWPDReadWithoutAByteCountFails(t *testing.T) {
+	f := &fakeWPD{startCtx: "ctx", total: 2500, chunk: 1000, chunks: split(pattern(2500), 1000), pad: true,
+		noCountAt: 1}
+	code, data, err := wpdRead(f, "request 0x1009", 0x1009, nil)
+	e, ok := errs.As(err)
+	if !ok || e.Kind != errs.NotResponding || e.Hint == "" || code != 0 || data != nil ||
+		!strings.Contains(err.Error(), "request 0x1009") || !strings.Contains(err.Error(), "element not found") {
+		t.Fatalf("%#x, %d bytes, err = %v", code, len(data), err)
+	}
+	if f.reads != 1 {
+		t.Fatalf("%d reads after the failed one, want none", f.reads-1)
+	}
+	checkEndedOnce(t, f)
 }
 
 func TestWPDReadThatNeverStartedEndsNothing(t *testing.T) {

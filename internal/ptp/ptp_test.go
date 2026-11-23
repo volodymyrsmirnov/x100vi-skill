@@ -154,3 +154,52 @@ func TestObjectInfoParsesWholeOrNotAtAll(t *testing.T) {
 		}
 	}
 }
+
+// A description that does not parse completely does not count: the object stays undownloadable.
+func TestATruncatedDescriptionDoesNotCountAsDescribed(t *testing.T) {
+	session, fake := open(t)
+	fake.Objects[5] = fakecam.Object{Format: 0x3801, Data: []byte("\xff\xd8x")}
+	info := make([]byte, 52) // the fixed part, but none of the four strings
+	binary.LittleEndian.PutUint16(info[4:], 0x3801)
+	answer(fake, ptp.OpGetObjectInfo, info)
+	if code, _, _, err := session.Transact(ptp.OpGetObjectInfo, []uint32{5}, nil); err != nil || code != 0x2001 {
+		t.Fatalf("0x%04X %v", code, err)
+	}
+	counts := sent(fake)
+	if _, _, _, err := session.Transact(ptp.OpGetObject, []uint32{5}, nil); err == nil ||
+		!strings.Contains(err.Error(), "before reading its description") {
+		t.Fatalf("got %v", err)
+	}
+	if counts[ptp.OpGetObject] != 0 {
+		t.Fatal("GetObject reached the camera")
+	}
+}
+
+// Handles belong to a session: opening or closing one forgets every description.
+func TestOpeningOrClosingTheSessionForgetsDescriptions(t *testing.T) {
+	for _, how := range []string{"close", "open"} {
+		t.Run(how, func(t *testing.T) {
+			session, fake := open(t)
+			fake.Objects[5] = fakecam.Object{Format: 0x3801, Data: []byte("\xff\xd8x")}
+			if code, _, _, err := session.Transact(ptp.OpGetObjectInfo, []uint32{5}, nil); err != nil || code != 0x2001 {
+				t.Fatalf("0x%04X %v", code, err)
+			}
+			if how == "close" {
+				if err := session.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := session.Open(); err != nil {
+				t.Fatal(err)
+			}
+			counts := sent(fake)
+			if _, _, _, err := session.Transact(ptp.OpGetObject, []uint32{5}, nil); err == nil ||
+				!strings.Contains(err.Error(), "before reading its description") {
+				t.Fatalf("got %v", err)
+			}
+			if counts[ptp.OpGetObject] != 0 {
+				t.Fatal("GetObject reached the camera")
+			}
+		})
+	}
+}

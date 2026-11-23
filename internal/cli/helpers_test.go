@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/volodymyrsmirnov/x100vi-skill/internal/camlock"
 	"github.com/volodymyrsmirnov/x100vi-skill/internal/fakecam"
 	"github.com/volodymyrsmirnov/x100vi-skill/internal/ptp"
 )
@@ -33,11 +34,27 @@ func (r result) json(t *testing.T) map[string]any {
 	return v
 }
 
-// isolate points the state folder (automatic backups) at a temp folder and returns it.
+// TestMain points the camera lock at a file of this test process, so `go test ./internal/cli` never
+// waits for (or blocks) a real x100vi command. isolate gives each test its own lock file as well.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "x100vi-cli-test")
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv(camlock.EnvVar, filepath.Join(dir, "camera.lock"))
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
+
+// isolate points the state folder (automatic backups) and the camera lock at a temp folder and returns
+// the state folder.
 func isolate(t *testing.T) string {
 	t.Helper()
-	state := filepath.Join(t.TempDir(), "state")
+	dir := t.TempDir()
+	state := filepath.Join(dir, "state")
 	t.Setenv("X100VI_HOME", state)
+	t.Setenv(camlock.EnvVar, filepath.Join(dir, "camera.lock"))
 	return state
 }
 

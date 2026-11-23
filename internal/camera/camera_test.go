@@ -507,3 +507,64 @@ func TestASideEffectTheCameraWillNotUndoIsReportedByName(t *testing.T) {
 		t.Fatalf("%q / %q", e.Message, e.Hint)
 	}
 }
+
+// Writing the white-balance mode a register already has changes nothing, so the shift it remembers is
+// not exempt: a Kelvin change zeroes the shift on the body, and the repair pass writes it back.
+func TestAPartialKelvinChangeInKelvinModeKeepsTheShift(t *testing.T) {
+	cam, fake := setup(t)
+	mustWrite(t, cam, recipe(t, `{"name": "K", "white_balance": {"mode": "kelvin", "kelvin": 6500, "shift_r": 3, "shift_b": -2}}`), slot(2), false)
+	mustWrite(t, cam, recipe(t, `{"white_balance": {"mode": "kelvin", "kelvin": 5000}}`), slot(2), true)
+	got := mustRead(t, cam, slot(2))["white_balance"]
+	want := map[string]any{"mode": "kelvin", "kelvin": 5000.0, "shift_r": 3.0, "shift_b": -2.0}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	// the body did zero the shift on the Kelvin write: the shift was written again afterwards
+	shiftR := model.ByKey["white_balance.shift_r"].Slot
+	kelvin := model.ByKey["white_balance.kelvin"].Slot
+	last := map[uint16]int{}
+	for i, w := range fake.Writes {
+		last[w.Code] = i
+	}
+	if last[shiftR] < last[kelvin] {
+		t.Fatal("the shift was not written back after the Kelvin")
+	}
+}
+
+// When the shift cannot be put back, the change is reported, not silently lost.
+func TestALostShiftInTheSameWBModeIsReported(t *testing.T) {
+	cam, fake := setup(t)
+	mustWrite(t, cam, recipe(t, `{"name": "K", "white_balance": {"mode": "kelvin", "kelvin": 6500, "shift_r": 3, "shift_b": -2}}`), slot(2), false)
+	fake.FieldHook = func(state map[string]int, f model.Field, target fakecam.Target, wire int, next func() uint16) uint16 {
+		if f.Key == "white_balance.shift_r" && wire != 0 {
+			return 0x201C
+		}
+		return next()
+	}
+	_, err := cam.Write(recipe(t, `{"white_balance": {"mode": "kelvin", "kelvin": 5000}}`), slot(2), true)
+	e := wantKind(t, err, errs.InvalidRecipe)
+	if !strings.Contains(e.Message, "white_balance.shift_r (0xD19A) was 0x0003, camera holds 0x0000") {
+		t.Fatal(e.Message)
+	}
+}
+
+// A setting the target's final state hides (here a mono tint under a colour film) is neither repaired
+// nor reported: naming a blank register seeds the tint from live mono settings, and the camera refuses
+// to write a tint while a colour film is selected.
+func TestASeededHiddenMonoTintDoesNotFailAColourRecipe(t *testing.T) {
+	cam, fake := setup(t)
+	fake.Live["film_simulation"] = model.FilmSimulation.Codes["acros"]
+	fake.Live["monochromatic.warm_cool"] = 30         // +3
+	fake.Live["monochromatic.magenta_green"] = 0xFFEC // -2
+	mustWrite(t, cam, recipe(t, `{"name": "COLOUR", "film_simulation": "classic_chrome"}`), slot(5), false)
+	if !fake.NamedBefore[5] {
+		t.Fatal("the register was not named, so the quirk was not exercised")
+	}
+	got := mustRead(t, cam, slot(5))
+	if got["film_simulation"] != "classic_chrome" || got["name"] != "COLOUR" {
+		t.Fatal(got)
+	}
+	if _, ok := got["monochromatic"]; ok {
+		t.Fatal("a hidden tint was read as part of the recipe")
+	}
+}

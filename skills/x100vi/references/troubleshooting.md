@@ -91,12 +91,18 @@ binary for this system from the latest GitHub release on first use and caches it
 
 ## Platforms
 
-- **macOS**: works out of the box, through macOS' camera service (ImageCaptureCore). Other camera apps
-  may stay open.
+- **Every system**: while an `x100vi` command runs, do not use other camera programs (X RAW Studio,
+  X Acquire, Lightroom, Capture One, Image Capture imports): another program's images could be mistaken for
+  a preview. A second `x100vi` command waits for the first.
+- **macOS**: works out of the box, through macOS' camera service (ImageCaptureCore).
 - **Windows**: not tested on hardware. Works through Windows Portable Devices with Windows' own driver;
   no extra driver is needed. The camera should appear in Explorer under This PC.
+  On Windows a request that hangs inside the driver is not timed out by the tool: if a command stops
+  responding, switch the camera off and on.
   If WinUSB was once installed with Zadig for this camera, switch it back to the Windows driver: in Device
-  Manager uninstall the camera, then unplug and replug it (the tool uses Windows Portable Devices).
+  Manager uninstall the camera device with "Attempt to remove the driver for this device" (or "Delete the
+  driver software for this device") ticked, then unplug and replug it (the tool uses Windows Portable
+  Devices).
 - **Linux**: expected to work, not tested on hardware. Uses the kernel's own USB interface (usbfs); nothing
   else to install. The desktop may auto-mount the camera (gvfs): unmount it first. Your user needs access
   to the USB device: a udev rule for vendor `04cb`, or `sudo`.

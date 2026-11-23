@@ -175,13 +175,48 @@ func TestUSBSendsDataInChunksWithZeroLengthPacket(t *testing.T) {
 	}
 }
 
+// OpenSession is transaction 0 and is answered with 0; the requests after it count from 1.
 func TestUSBTransactionIDsCount(t *testing.T) {
-	pipe := &fakePipe{reads: [][]byte{container(ptp.Resp, ptp.RCOK, 1, nil), container(ptp.Resp, ptp.RCOK, 2, nil)}}
+	pipe := &fakePipe{reads: [][]byte{
+		container(ptp.Resp, ptp.RCOK, 1, nil), // GetDeviceInfo before the session
+		container(ptp.Resp, ptp.RCOK, 0, nil), // OpenSession
+		container(ptp.Resp, ptp.RCOK, 1, nil),
+		container(ptp.Resp, ptp.RCOK, 2, nil),
+		container(ptp.Resp, ptp.RCOK, 3, nil), // CloseSession
+	}}
 	f := usbFramer{pipe: pipe, outMPS: 512, inMPS: 512}
-	f.transact(0x1002, []uint32{1}, nil)
-	f.transact(0x1001, nil, nil)
-	if h, _ := parseHeader(pipe.writes[1]); h.tid != 2 {
-		t.Fatalf("second transaction id = %d", h.tid)
+	for i, op := range []uint16{ptp.OpGetDeviceInfo, ptp.OpOpenSession, 0x1015, 0x1015, ptp.OpCloseSession} {
+		if code, _, _, err := f.transact(op, nil, nil); err != nil || code != ptp.RCOK {
+			t.Fatalf("request %d (0x%04X) = %#x %v", i, op, code, err)
+		}
+	}
+	var got []uint32
+	for _, w := range pipe.writes {
+		h, _ := parseHeader(w)
+		got = append(got, h.tid)
+	}
+	if want := []uint32{1, 0, 1, 2, 3}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("transaction ids = %v, want %v", got, want)
+	}
+	if len(pipe.reads) != 0 {
+		t.Fatalf("%d transfers left unread", len(pipe.reads))
+	}
+}
+
+// A second OpenSession (the session was reopened) starts the count again.
+func TestUSBOpenSessionRestartsTheCount(t *testing.T) {
+	f, pipe := staleFramer(container(ptp.Resp, ptp.RCSessionOpen, 0, nil), container(ptp.Resp, ptp.RCOK, 1, nil))
+	if code, _, _, err := f.transact(ptp.OpOpenSession, []uint32{1}, nil); err != nil || code != ptp.RCSessionOpen {
+		t.Fatalf("OpenSession = %#x %v", code, err)
+	}
+	if code, _, _, err := f.transact(ptp.OpGetDeviceInfo, nil, nil); err != nil || code != ptp.RCOK {
+		t.Fatalf("GetDeviceInfo = %#x %v", code, err)
+	}
+	if h, _ := parseHeader(pipe.writes[0]); h.tid != 0 {
+		t.Fatalf("OpenSession sent as transaction %d", h.tid)
+	}
+	if h, _ := parseHeader(pipe.writes[1]); h.tid != 1 {
+		t.Fatalf("request after OpenSession sent as transaction %d", h.tid)
 	}
 }
 
@@ -247,14 +282,90 @@ func TestUSBGivesUpOnEndlessStaleContainers(t *testing.T) {
 	}
 }
 
-func TestUSBAcceptsTransactionIDZeroOnlyForSessionRequests(t *testing.T) {
-	f, _ := staleFramer(container(ptp.Resp, ptp.RCOK, 0, nil))
+// OpenSession expects the answer of transaction 0, and discards answers to other transactions.
+func TestUSBOpenSessionIsTransactionZero(t *testing.T) {
+	f, pipe := staleFramer(container(ptp.Resp, 0x2019, 4, nil), container(ptp.Resp, ptp.RCOK, 0, nil))
 	if code, _, _, err := f.transact(ptp.OpOpenSession, []uint32{1}, nil); err != nil || code != ptp.RCOK {
 		t.Fatalf("OpenSession = %#x %v", code, err)
 	}
-	f, _ = staleFramer(container(ptp.Resp, ptp.RCOK, 0, nil), container(ptp.Resp, 0x2019, 5, nil))
-	if code, _, _, err := f.transact(0x1001, nil, nil); err != nil || code != 0x2019 {
-		t.Fatalf("GetDeviceInfo = %#x %v", code, err)
+	if h, _ := parseHeader(pipe.writes[0]); h.tid != 0 || h.code != ptp.OpOpenSession {
+		t.Fatalf("OpenSession sent as %+v", h)
+	}
+	if len(pipe.reads) != 0 || f.tid != 0 {
+		t.Fatalf("%d transfers left unread, last id %d", len(pipe.reads), f.tid)
+	}
+}
+
+// Every request other than OpenSession, CloseSession included, takes only the answer with its own id:
+// a stale transaction-0 response (an earlier OpenSession) is not the answer.
+func TestUSBZeroIDIsNotTheAnswerToOtherRequests(t *testing.T) {
+	for _, op := range []uint16{ptp.OpCloseSession, ptp.OpGetDeviceInfo} {
+		f, pipe := staleFramer(container(ptp.Resp, ptp.RCOK, 0, nil), container(ptp.Resp, 0x2019, 5, nil))
+		code, _, _, err := f.transact(op, nil, nil)
+		if err != nil || code != 0x2019 {
+			t.Fatalf("0x%04X = %#x %v", op, code, err)
+		}
+		if h, _ := parseHeader(pipe.writes[0]); h.tid != 5 {
+			t.Fatalf("0x%04X sent as transaction %d", op, h.tid)
+		}
+		if len(pipe.reads) != 0 {
+			t.Fatalf("0x%04X: %d transfers left unread", op, len(pipe.reads))
+		}
+	}
+	// Only zero-id answers: CloseSession gives up rather than taking one of them.
+	var reads [][]byte
+	for i := 0; i <= maxStaleContainers; i++ {
+		reads = append(reads, container(ptp.Resp, ptp.RCOK, 0, nil))
+	}
+	f, _ := staleFramer(reads...)
+	if _, _, _, err := f.transact(ptp.OpCloseSession, nil, nil); !errors.Is(err, errStaleContainers) {
+		t.Fatalf("CloseSession err = %v", err)
+	}
+}
+
+// drain throws away what an interrupted process left in the pipe, so the first request reads its own
+// answer.
+func TestUSBDrainDiscardsStaleData(t *testing.T) {
+	stale := container(ptp.Data, 0x1009, 7, bytes.Repeat([]byte{0xEE}, usbReadSize+10))
+	pipe := &fakePipe{reads: [][]byte{stale[:usbReadSize], stale[usbReadSize:], {}, container(ptp.Resp, ptp.RCOK, 7, nil)}}
+	f := usbFramer{pipe: pipe, outMPS: 512, inMPS: 512}
+	reads, discarded := f.drain(pipe.BulkIn)
+	if reads != 5 || discarded != len(stale)+12 { // four transfers, then the timeout
+		t.Fatalf("drain = %d reads, %d bytes", reads, discarded)
+	}
+	if len(pipe.reads) != 0 {
+		t.Fatalf("%d transfers left", len(pipe.reads))
+	}
+	pipe.reads = [][]byte{container(ptp.Resp, ptp.RCOK, 0, nil)}
+	if code, _, _, err := f.transact(ptp.OpOpenSession, []uint32{1}, nil); err != nil || code != ptp.RCOK {
+		t.Fatalf("OpenSession after draining = %#x %v", code, err)
+	}
+}
+
+func TestUSBDrainOfAnEmptyPipeReadsOnce(t *testing.T) {
+	pipe := &fakePipe{}
+	f := usbFramer{pipe: pipe, outMPS: 512, inMPS: 512}
+	if reads, discarded := f.drain(pipe.BulkIn); reads != 1 || discarded != 0 {
+		t.Fatalf("drain = %d reads, %d bytes", reads, discarded)
+	}
+}
+
+func TestUSBDrainIsBounded(t *testing.T) {
+	// A pipe that never times out: small transfers stop at the read bound, full ones at the byte bound.
+	for _, tc := range []struct {
+		size      int
+		wantReads int
+	}{{size: 512, wantReads: maxDrainReads}, {size: 4 * usbReadSize, wantReads: maxDrainBytes / usbReadSize}} {
+		calls := 0
+		read := func(p []byte) (int, error) {
+			calls++
+			return min(len(p), tc.size), nil
+		}
+		f := usbFramer{outMPS: 512, inMPS: 512}
+		reads, discarded := f.drain(read)
+		if reads != tc.wantReads || calls != tc.wantReads || discarded > maxDrainBytes {
+			t.Fatalf("transfers of %d: drain = %d reads (%d calls), %d bytes", tc.size, reads, calls, discarded)
+		}
 	}
 }
 

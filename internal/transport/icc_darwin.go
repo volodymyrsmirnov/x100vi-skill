@@ -37,6 +37,7 @@ enum {
 	XI_TIMEOUT = 6,
 	XI_ERROR = 7,
 	XI_CLOSE_TIMEOUT = 8,
+	XI_CLOSE_PENDING = 9,
 };
 
 static void x_wake(void);
@@ -59,12 +60,18 @@ typedef struct {
 @implementation X100VIGoICCClose
 @end
 
+// The delegate also keeps the close bookkeeping. A close waits for didCloseSessionWithError:; when that
+// times out, the device is marked close-pending, and the callback that arrives later only clears that
+// mark: it must not be taken for the answer to a later close. The next open of a close-pending device
+// waits for that callback (or the device's removal) first. Each callback is consumed once: by the
+// pending mark of its device, else by the close currently waiting for that device, else by nothing.
 @interface X100VIGoICCDelegate : NSObject <ICDeviceBrowserDelegate, ICCameraDeviceDelegate>
 @property (atomic, strong) NSMutableArray *devices;
 @property (atomic) BOOL opened;
 @property (atomic, strong) NSError *openError;
 @property (atomic) BOOL removed;
 @property (atomic, strong) X100VIGoICCClose *closing;
+@property (atomic, strong) NSHashTable *closePending;
 @end
 
 @implementation X100VIGoICCDelegate
@@ -72,8 +79,43 @@ typedef struct {
 	self = [super init];
 	if (self) {
 		_devices = [NSMutableArray array];
+		_closePending = [NSHashTable hashTableWithOptions:
+			NSPointerFunctionsStrongMemory | NSPointerFunctionsObjectPointerPersonality];
 	}
 	return self;
+}
+- (BOOL)hasDevice:(ICDevice *)device {
+	@synchronized (self) { return [self.devices indexOfObjectIdenticalTo:device] != NSNotFound; }
+}
+- (BOOL)isClosePending:(ICDevice *)device {
+	@synchronized (self) { return [self.closePending containsObject:device]; }
+}
+// beginClose makes a waiter for device's close callback the current one.
+- (X100VIGoICCClose *)beginClose:(ICDevice *)device {
+	X100VIGoICCClose *closing = [[X100VIGoICCClose alloc] init];
+	closing.device = device;
+	@synchronized (self) { self.closing = closing; }
+	return closing;
+}
+// endClose stops waiting. A close that got no callback, of a device that was not removed, leaves the
+// device close-pending. It returns whether the close is over (confirmed, or the device is gone).
+- (BOOL)endClose:(X100VIGoICCClose *)closing {
+	@synchronized (self) {
+		if (self.closing == closing) {
+			self.closing = nil;
+		}
+		if (closing.done || self.removed) {
+			return YES;
+		}
+		[self.closePending addObject:closing.device];
+		return NO;
+	}
+}
+- (void)forgetDevice:(ICDevice *)device {
+	@synchronized (self) {
+		[self.devices removeObjectIdenticalTo:device];
+		[self.closePending removeObject:device];
+	}
 }
 // ICDeviceBrowserDelegate
 - (void)deviceBrowser:(ICDeviceBrowser *)browser didAddDevice:(ICDevice *)device moreComing:(BOOL)more {
@@ -81,7 +123,7 @@ typedef struct {
 	x_wake();
 }
 - (void)deviceBrowser:(ICDeviceBrowser *)browser didRemoveDevice:(ICDevice *)device moreGoing:(BOOL)more {
-	@synchronized (self) { [self.devices removeObject:device]; }
+	[self forgetDevice:device];
 	x_wake();
 }
 // ICDeviceDelegate
@@ -91,15 +133,21 @@ typedef struct {
 	x_wake();
 }
 - (void)device:(ICDevice *)device didCloseSessionWithError:(NSError *)error {
-	X100VIGoICCClose *closing = self.closing;
-	if (closing != nil && closing.device == device) {
-		closing.error = error;
-		closing.done = YES;
+	@synchronized (self) {
+		if ([self.closePending containsObject:device]) {
+			[self.closePending removeObject:device]; // the late answer to a close that timed out
+		} else if (self.closing != nil && self.closing.device == device && !self.closing.done) {
+			X100VIGoICCClose *closing = self.closing;
+			self.closing = nil;
+			closing.error = error;
+			closing.done = YES;
+		}
 	}
 	x_wake();
 }
 - (void)didRemoveDevice:(ICDevice *)device {
 	self.removed = YES;
+	@synchronized (self) { [self.closePending removeObject:device]; }
 	x_wake();
 }
 // ICCameraDeviceDelegate (required methods; the content catalog is not used)
@@ -184,7 +232,8 @@ static ICCameraDevice *x_find(void) {
 	return nil;
 }
 
-static int x_icc_open(double findTimeout, double openTimeout, uintptr_t *handle, char **message) {
+static int x_icc_open(double findTimeout, double pendingTimeout, double openTimeout, uintptr_t *handle,
+		char **message) {
 	@autoreleasepool {
 		*handle = 0;
 		*message = NULL;
@@ -210,6 +259,25 @@ static int x_icc_open(double findTimeout, double openTimeout, uintptr_t *handle,
 		ICCameraDevice *camera = x_find();
 		if (camera == nil) {
 			return XI_NOT_FOUND;
+		}
+		if ([gDelegate isClosePending:camera]) {
+			// An earlier close of this device timed out: wait for its late confirmation, or for the device
+			// to go away, before opening it again.
+			ICCameraDevice *pending = camera;
+			x_spin(^BOOL { return ![gDelegate isClosePending:pending] || ![gDelegate hasDevice:pending]; },
+				pendingTimeout);
+			if ([gDelegate hasDevice:pending]) {
+				if ([gDelegate isClosePending:pending]) {
+					return XI_CLOSE_PENDING;
+				}
+			} else {
+				x_spin(^BOOL { return x_find() != nil; }, findTimeout);
+				camera = x_find();
+				if (camera == nil) {
+					return XI_NOT_FOUND;
+				}
+			}
+			gDelegate.removed = NO;
 		}
 		camera.delegate = gDelegate;
 		[camera requestOpenSession];
@@ -284,12 +352,10 @@ static int x_icc_close(uintptr_t handle, double timeout, char **message) {
 			[camera requestCloseSession]; // still asked for, but its confirmation cannot arrive here
 			return XI_NOT_MAIN_THREAD;
 		}
-		X100VIGoICCClose *closing = [[X100VIGoICCClose alloc] init];
-		closing.device = camera;
-		gDelegate.closing = closing;
+		X100VIGoICCClose *closing = [gDelegate beginClose:camera];
 		[camera requestCloseSession];
-		BOOL done = x_spin(^BOOL { return closing.done || gDelegate.removed; }, timeout);
-		gDelegate.closing = nil;
+		x_spin(^BOOL { return closing.done || gDelegate.removed; }, timeout);
+		BOOL done = [gDelegate endClose:closing]; // on a timeout, marks the device close-pending
 		if (closing.error != nil) {
 			*message = x_strdup(closing.error.localizedDescription);
 			return XI_ERROR;
@@ -298,6 +364,62 @@ static int x_icc_close(uintptr_t handle, double timeout, char **message) {
 			return XI_CLOSE_TIMEOUT;
 		}
 		return XI_OK;
+	}
+}
+
+// x_close_check runs the close bookkeeping on a fresh delegate, with stand-in objects for devices (only
+// their identity is used), and returns 0 or the number of the first check that failed. For the tests,
+// which cannot reach ImageCaptureCore's callbacks off the main thread.
+static int x_close_check(void) {
+	@autoreleasepool {
+		X100VIGoICCDelegate *d = [[X100VIGoICCDelegate alloc] init];
+		ICDevice *a = (ICDevice *)(id)[[NSObject alloc] init];
+		ICDevice *b = (ICDevice *)(id)[[NSObject alloc] init];
+		NSError *failure = [NSError errorWithDomain:@"x100vi" code:1 userInfo:nil];
+		@synchronized (d) { [d.devices addObject:a]; [d.devices addObject:b]; }
+
+		// A confirmed close: done, with the device's error, and nothing pending.
+		X100VIGoICCClose *c = [d beginClose:a];
+		[d device:a didCloseSessionWithError:failure];
+		if (!c.done || c.error != failure || ![d endClose:c] || [d isClosePending:a]) return 1;
+
+		// A callback with no close waiting is dropped.
+		[d device:a didCloseSessionWithError:nil];
+		if ([d isClosePending:a] || d.closing != nil) return 2;
+
+		// A close that times out leaves the device close-pending.
+		c = [d beginClose:a];
+		if ([d endClose:c] || ![d isClosePending:a] || d.closing != nil) return 3;
+
+		// Another device's callback does not answer a waiting close.
+		X100VIGoICCClose *cb = [d beginClose:b];
+		[d device:a didCloseSessionWithError:nil]; // a's late callback: clears a's mark only
+		if (cb.done || [d isClosePending:a]) return 4;
+		[d device:b didCloseSessionWithError:nil];
+		if (!cb.done || ![d endClose:cb] || [d isClosePending:b]) return 5;
+
+		// With a close of a pending and a close of a waiting at once, the first callback is the late one
+		// and only clears the mark; the second answers the waiting close; a third is dropped.
+		c = [d beginClose:a];
+		[d endClose:c];
+		X100VIGoICCClose *again = [d beginClose:a];
+		[d device:a didCloseSessionWithError:failure];
+		if (again.done || [d isClosePending:a]) return 6;
+		[d device:a didCloseSessionWithError:nil];
+		if (!again.done || again.error != nil || d.closing != nil) return 7;
+		[d device:a didCloseSessionWithError:failure];
+		if (again.error != nil || [d isClosePending:a]) return 8;
+		if (![d endClose:again] || [d isClosePending:a]) return 9;
+
+		// The device's removal clears the mark, and a close that ended with the device removed is over.
+		c = [d beginClose:b];
+		[d endClose:c];
+		[d forgetDevice:b]; // what the browser's didRemoveDevice: does
+		if ([d isClosePending:b] || [d hasDevice:b]) return 10;
+		d.removed = YES;
+		c = [d beginClose:a];
+		if (![d endClose:c] || [d isClosePending:a]) return 11;
+		return 0;
 	}
 }
 */
@@ -321,7 +443,13 @@ const (
 	iccFindTimeout  = 6 * time.Second
 	iccOpenTimeout  = 15 * time.Second
 	iccCloseTimeout = 5 * time.Second
+	// iccPendingTimeout is how long an open waits for the late confirmation of an earlier close of the
+	// same device that timed out.
+	iccPendingTimeout = 5 * time.Second
 )
+
+// iccCloseCheck runs the close bookkeeping checks in the shim (x_close_check); 0 means they passed.
+func iccCloseCheck() int { return int(C.x_close_check()) }
 
 type iccTransport struct {
 	handle C.uintptr_t
@@ -338,7 +466,8 @@ func errNotMainThread() error {
 func Open() (ptp.Transport, error) {
 	var handle C.uintptr_t
 	var message *C.char
-	status := C.x_icc_open(C.double(iccFindTimeout.Seconds()), C.double(iccOpenTimeout.Seconds()), &handle, &message)
+	status := C.x_icc_open(C.double(iccFindTimeout.Seconds()), C.double(iccPendingTimeout.Seconds()),
+		C.double(iccOpenTimeout.Seconds()), &handle, &message)
 	reason := ""
 	if message != nil {
 		reason = C.GoString(message)
@@ -358,6 +487,9 @@ func Open() (ptp.Transport, error) {
 				"switched on, switch it off and on once: it may have stopped responding.")
 	case C.XI_OPEN_TIMEOUT:
 		return nil, errs.NotRespondingErr(fmt.Sprintf("macOS could not open the camera within %g s", iccOpenTimeout.Seconds()))
+	case C.XI_CLOSE_PENDING:
+		return nil, errs.New(errs.NotResponding, "the camera is still closing the previous connection",
+			"Switch the camera off and on, then run the command again.")
 	default: // XI_OPEN_ERROR
 		return nil, errs.New(errs.CameraBusy, "macOS could not open the camera: "+reason,
 			"Quit other apps that use the camera, then try again.")

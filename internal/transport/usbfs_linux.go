@@ -82,6 +82,9 @@ func openUSBFS(sysRoot, devRoot string) (*usbfsTransport, error) {
 				"Image Capture, Photos, Lightroom or any other app that talks to the camera, then try again. "+linuxHint)
 	}
 	t.framer = usbFramer{pipe: t, outMPS: t.intf.outMPS, inMPS: t.intf.inMPS}
+	// An earlier process that was interrupted mid-transaction may have left data or a response in the
+	// pipe; throw it away before the first request.
+	t.framer.drain(func(p []byte) (int, error) { return t.bulkTimeout(t.intf.epIn, p, drainTimeoutMS) })
 	return t, nil
 }
 
@@ -144,7 +147,11 @@ func (t *usbfsTransport) detachKernelDriver() error {
 }
 
 func (t *usbfsTransport) bulk(ep uint8, p []byte) (int, error) {
-	xfer := usbdevfsBulkTransfer{ep: uint32(ep), len: uint32(len(p)), timeout: usbTimeoutMS}
+	return t.bulkTimeout(ep, p, usbTimeoutMS)
+}
+
+func (t *usbfsTransport) bulkTimeout(ep uint8, p []byte, timeoutMS uint32) (int, error) {
+	xfer := usbdevfsBulkTransfer{ep: uint32(ep), len: uint32(len(p)), timeout: timeoutMS}
 	if len(p) > 0 {
 		xfer.data = unsafe.Pointer(&p[0])
 	}

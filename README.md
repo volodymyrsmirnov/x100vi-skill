@@ -267,12 +267,20 @@ The tool uses each system's own interface for cameras, so there are no drivers o
 
 | | Interface | Status |
 |---|---|---|
-| macOS | ImageCaptureCore, the system camera service. Other camera apps (Image Capture, Photos) may stay open. | Tested on a real X100VI. |
+| macOS | ImageCaptureCore, the system camera service. | Tested on a real X100VI. |
 | Windows | Windows Portable Devices, with Windows' own driver. The camera also stays visible in Explorer. | Built and unit-tested in CI; **not yet tested on a camera**. Reports welcome. |
 | Linux | The kernel's USB device interface (usbfs). Unmount the camera if your desktop auto-mounts it, and give your user access to USB vendor `04cb` (udev rule) or use `sudo`. Only one program can hold the camera at a time. | Built and unit-tested in CI; **not yet tested on a camera**. Reports welcome. |
 
+While an `x100vi` command runs, do not use other camera programs (X RAW Studio, X Acquire, Lightroom,
+Capture One, Image Capture imports): another program's images could be mistaken for a preview. A second
+`x100vi` command waits for the first.
+
+On Windows a request that hangs inside the driver is not timed out by the tool: if a command stops
+responding, switch the camera off and on.
+
 If you once replaced the camera's Windows driver with WinUSB (for example with Zadig), switch it back in
-Device Manager: uninstall the camera device, then unplug and replug it.
+Device Manager: uninstall the camera device with "Attempt to remove the driver for this device" (or
+"Delete the driver software for this device") ticked, then unplug and replug the camera.
 
 ## Safety
 

@@ -144,8 +144,9 @@ another body; `--other-body` overrides only the last check and needs the user's 
 - **Never pass `--overwrite`, `restore --yes` or `--other-body` on your own judgment.** They replace the
   user's saved looks or settings.
 - Do not invent settings. The camera accepts only what the schema lists; `validate` is the authority.
-- One `x100vi` command at a time: a second one waits for the first (or fails with `camera_busy`). On Linux
-  no other camera program may hold the camera; on macOS and Windows other apps may stay open.
+- One `x100vi` command at a time: a second one waits for the first (or fails with `camera_busy`). While an
+  `x100vi` command runs, do not use other camera programs (X RAW Studio, X Acquire, Lightroom, Capture One,
+  Image Capture imports): another program's images could be mistaken for a preview.
 - RAF files must come from an X100VI. JPEGs cannot be previewed.
 - If `preview` reports a conversion timeout, do not run it again. Tell the user to switch the camera off
   and on first.

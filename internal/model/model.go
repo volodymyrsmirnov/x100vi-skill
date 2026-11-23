@@ -630,6 +630,13 @@ func EncodeRecipe(recipe map[string]any, partial bool) ([]Write, error) {
 	full := Merged(recipe, partial)
 	film, _ := filmCode(full)
 	wb, _ := Get(full, "white_balance.mode").(string)
+	// RAW-only is decided on the encoded value, so "unknown:0x0001" counts as raw too.
+	rawOnly := false
+	if q := Get(full, "image_quality"); q != nil {
+		if wire, err := EncodeField(ByKey["image_quality"], q); err == nil && wire == ImageQuality.Codes["raw"] {
+			rawOnly = true
+		}
+	}
 	var writes []Write
 	for _, f := range Fields {
 		value := Get(full, f.Key)
@@ -655,7 +662,7 @@ func EncodeRecipe(recipe map[string]any, partial bool) ([]Write, error) {
 			return nil, errs.Recipe("white_balance.kelvin is only used when white_balance.mode is kelvin",
 				`Set "mode": "kelvin", or remove `+"`kelvin`.")
 		}
-		if q, _ := Get(full, "image_quality").(string); f.Needs == "jpeg" && strings.EqualFold(q, "raw") {
+		if f.Needs == "jpeg" && rawOnly {
 			return nil, errs.Recipe("image_size cannot be set while image_quality is raw",
 				"Use fine, normal, fine_raw or normal_raw, or remove image_size.")
 		}

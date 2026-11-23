@@ -118,14 +118,45 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: 0.2.${{ github.run_number }}
         run: |
-          # Only the newest commit on main may become "latest": with several pushes in flight, an older run
-          # that finishes last must not take "latest" away from a newer release.
-          head=$(gh api "repos/${{ github.repository }}/commits/main" --jq .sha)
-          latest=false
-          if [ "$head" = "${{ github.sha }}" ]; then latest=true; fi
+          # Every push keeps its own release; the promote job below decides which one is "latest".
           gh release create "v$VERSION" dist/* \
             --repo "${{ github.repository }}" \
             --target "${{ github.sha }}" \
             --title "x100vi $VERSION" \
             --generate-notes \
-            --latest="$latest"
+            --latest=false
+
+  # Marks the release built from main's current head as "latest". Runs one at a time (never cancelled
+  # mid-way), and always re-reads the head, so an older run finishing last cannot take "latest" from a
+  # newer release. When the head's release does not exist yet, it does nothing: the run building that
+  # commit promotes it when its own release is published.
+  promote:
+    name: promote latest
+    needs: release
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: promote-latest
+      cancel-in-progress: false
+    steps:
+      - name: Mark the head of main as the latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          head=$(gh api "repos/$REPO/commits/main" --jq .sha)
+          case "$head" in
+            *[!0-9a-f]*|"") echo "unexpected head sha: $head" >&2; exit 1 ;;
+          esac
+          # Newest first; a failing API call fails the job instead of looking like "no release yet".
+          tags=$(gh api --paginate "repos/$REPO/releases" \
+            --jq ".[] | select(.draft == false and .target_commitish == \"$head\") | .tag_name")
+          tag=$(printf '%s\n' "$tags" | head -n 1)
+          if [ -z "$tag" ]; then
+            echo "No release for main's head $head yet; the run that builds it will promote it."
+            exit 0
+          fi
+          echo "Marking $tag (built from $head) as the latest release."
+          gh release edit "$tag" --repo "$REPO" --latest

@@ -342,3 +342,39 @@ func TestPowerShellLauncherDownloadsToPerProcessFiles(t *testing.T) {
 		t.Error("the move into the cache must happen inside the try block")
 	}
 }
+
+// Two PowerShell launchers never download or install at once: a named mutex serialises them, the one
+// that waited re-checks for the tool, and a tool another command is running is used rather than
+// replaced. Checked by reading the script, like the test above.
+func TestPowerShellLauncherSerialisesInstalls(t *testing.T) {
+	body, err := os.ReadFile("../../skills/x100vi/scripts/x100vi.ps1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	at := func(s string) int {
+		t.Helper()
+		i := strings.Index(text, s)
+		if i < 0 {
+			t.Fatalf("x100vi.ps1 lacks %q", s)
+		}
+		return i
+	}
+	mutex := at(`[System.Threading.Mutex]::new($false, "Local\x100vi-launcher")`)
+	wait := at("$mutex.WaitOne([TimeSpan]::FromMinutes(5))")
+	recheck := at("if (-not $SelfUpdate -and (Test-Path -PathType Leaf $Tool)) {")
+	download := at(`Invoke-WebRequest -UseBasicParsing -Uri "$ReleaseUrl/$Asset"`)
+	move := at("Move-Item -Force $tmp $Tool")
+	inUse := at("$inUse -and $valid -and -not $SelfUpdate")
+	release := at("if ($owned) { $mutex.ReleaseMutex() }")
+	at("AbandonedMutexException")
+	at("Download-Tool -SelfUpdate")
+	if !(mutex < wait && wait < recheck && recheck < download && download < move && move < inUse && inUse < release) {
+		t.Errorf("out of order: mutex %d, wait %d, re-check %d, download %d, move %d, in-use %d, release %d",
+			mutex, wait, recheck, download, move, inUse, release)
+	}
+	// the release is in the outermost finally block, after every exit path inside the download
+	if strings.LastIndex(text, "} finally {") > release {
+		t.Error("the mutex is not released in the last finally block")
+	}
+}

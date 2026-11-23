@@ -176,6 +176,9 @@ func TestRejectsWhatTheCameraCannotHold(t *testing.T) {
 		{`{"image_quality": "raw", "image_size": "l_3:2"}`, "cannot be set while"},
 		{`{"image_quality": "RAW", "image_size": "l_3:2"}`, "cannot be set while"},
 		{`{"image_quality": "Raw", "image_size": "unknown:0x0004"}`, "cannot be set while"},
+		// RAW-only is the wire value 1, however the recipe spells it
+		{`{"image_quality": "unknown:0x0001", "image_size": "l_3:2"}`, "cannot be set while"},
+		{`{"image_quality": "UNKNOWN:0x1", "image_size": "l_3:2"}`, "cannot be set while"},
 		{`{"image_size": "unknown:0x10000"}`, "0xFFFF at most"},
 		{`{"film_simulation": "unknown:0xFFFFFFFF"}`, "0xFFFF at most"},
 		{`{"film_simulation": "unknown:0x-1"}`, "not a valid code"},

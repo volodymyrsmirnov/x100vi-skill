@@ -31,8 +31,10 @@ type wpdTransfers interface {
 	// ctx is not empty even when err is not nil, and the caller must end it.
 	startRead(what string, op uint16, params []uint32) (ctx string, chunk uint32, total uint64, err error)
 	// readChunk sends READ_DATA for up to want bytes. It returns the buffer the driver handed back and
-	// NUM_BYTES_READ, or n < 0 when the driver did not report it.
-	readChunk(what, ctx string, want uint32) (buf []byte, n int, err error)
+	// NUM_BYTES_READ, which says how much of the buffer is data. READ_DATA results must carry that count
+	// (the buffer may keep the requested size), so readChunk fails, with errNoByteCount, when it is
+	// missing or unreadable; the payload length is never guessed from the buffer.
+	readChunk(what, ctx string, want uint32) (buf []byte, n uint32, err error)
 	// startWrite sends EXECUTE_COMMAND_WITH_DATA_TO_WRITE for total bytes, with the same contract as
 	// startRead.
 	startWrite(what string, op uint16, params []uint32, total uint64) (ctx string, chunk uint32, err error)
@@ -74,13 +76,11 @@ func wpdRead(c wpdTransfers, what string, op uint16, params []uint32) (uint16, [
 			return 0, nil, wpdAbort(c, what, ctx, err)
 		}
 		// The buffer may keep the requested size; NUM_BYTES_READ says how much of it is data.
-		if n >= 0 {
-			if n > len(buf) {
-				return 0, nil, wpdAbort(c, what, ctx, errs.NotRespondingErr(fmt.Sprintf(
-					"Windows reported %d bytes read during %s but returned %d", n, what, len(buf))))
-			}
-			buf = buf[:n]
+		if uint64(n) > uint64(len(buf)) {
+			return 0, nil, wpdAbort(c, what, ctx, errs.NotRespondingErr(fmt.Sprintf(
+				"Windows reported %d bytes read during %s but returned %d", n, what, len(buf))))
 		}
+		buf = buf[:n]
 		data = append(data, buf...)
 		if unknown {
 			if len(buf) < int(want) {
@@ -119,6 +119,13 @@ func wpdWrite(c wpdTransfers, what string, op uint16, params []uint32, data []by
 		pos += int(written) // a short write is resent from where it stopped
 	}
 	return c.endTransfer(what, ctx)
+}
+
+// errNoByteCount is the failure of a READ_DATA whose results lack a readable NUM_BYTES_READ (cause is
+// why it could not be read).
+func errNoByteCount(what string, cause error) error {
+	e := errs.NotRespondingErr(fmt.Sprintf("Windows did not report how many bytes it read during %s (%v)", what, cause))
+	return errs.Wrap(e.Kind, cause, e.Message, e.Hint)
 }
 
 // wpdAbort ends the transfer context ctx, if one was started, after cause made the transfer fail. It

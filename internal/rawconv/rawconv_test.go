@@ -655,3 +655,116 @@ func TestAnUnreadableProfileReadbackNeverTriggers(t *testing.T) {
 		})
 	}
 }
+
+// The read-back after the write must be as long as the as-shot profile (29 cells, 625 bytes): one cell
+// short, the comparison would skip the last cell, so nothing is developed.
+func TestAProfileReadbackOneCellShortNeverTriggers(t *testing.T) {
+	conv, fake, raf := setup(t)
+	shot := upload(t, conv, raf)
+	if conv.AsShot.Cells() != 29 {
+		t.Fatal(conv.AsShot.Cells())
+	}
+	fake.Intercept = func(op uint16, params []uint32, data []byte, next func() (uint16, []byte)) (uint16, []byte) {
+		code, d := next()
+		if op == ptp.OpGetDevicePropValue && params[0] == camera.ProfileProp && len(d) >= 4 {
+			d = d[:len(d)-4] // the stored profile, last cell removed
+		}
+		return code, d
+	}
+	_, err := conv.Develop(shot, false, 0, "")
+	if e := wantKind(t, err, errs.ConversionFailed); !strings.Contains(e.Message, "unreadable conversion settings (621 bytes)") {
+		t.Fatal(e.Message)
+	}
+	if n := triggers(fake); n != 0 {
+		t.Fatal(n)
+	}
+
+	// Without a known as-shot profile, the camera's own form (29 cells) is the minimum.
+	conv.AsShot = nil
+	if _, err := conv.Develop(shot, false, 0, ""); err == nil || triggers(fake) != 0 {
+		t.Fatal("triggered after a short read-back", err)
+	}
+}
+
+// timingOut is a camera whose transport times out on the first conversion trigger after the body got
+// it, or (refuse) answers it with a clean PTP refusal. Later triggers go through.
+type timingOut struct {
+	*fakecam.FakeX100VI
+	refuse bool
+	done   bool
+}
+
+func (t *timingOut) Transact(op uint16, params []uint32, data []byte) (uint16, []uint32, []byte, error) {
+	if op == ptp.OpSetDevicePropValue && len(params) == 1 && params[0] == PropTrigger && !t.done {
+		t.done = true
+		if t.refuse {
+			return 0x2002, nil, nil, nil // GeneralError: the body did not start
+		}
+		t.FakeX100VI.Transact(op, params, data) // the body received it and may be converting
+		return 0, nil, nil, errs.NotRespondingErr("the camera did not answer within 10 s")
+	}
+	return t.FakeX100VI.Transact(op, params, data)
+}
+
+// A trigger whose outcome is unknown (transport timeout) means a conversion may be running: no
+// converter, not even a fresh one on the same camera session, triggers again.
+func TestATriggerThatTimesOutIsNeverFollowedByAnother(t *testing.T) {
+	fake := fakecam.New()
+	fake.StallConversion = true
+	cam, err := camera.Open(&timingOut{FakeX100VI: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cam.Close() })
+	conv := NewRawConverter(cam)
+	shot := upload(t, conv, fakecam.RAFBytes("", 0))
+	if _, err := conv.Develop(shot, false, 0, ""); !errs.Is(err, errs.NotResponding) {
+		t.Fatal(err)
+	}
+	if !cam.ConversionMayBeRunning {
+		t.Fatal("the camera session does not know a conversion may be running")
+	}
+	fake.StallConversion = false
+	again := NewRawConverter(cam)
+	shot = upload(t, again, fakecam.RAFBytes("", 0))
+	_, err = again.Develop(shot, false, 0, "")
+	if e := wantKind(t, err, errs.ConversionFailed); !strings.Contains(e.Message, "never finished") {
+		t.Fatal(e.Message)
+	}
+	if n := triggers(fake); n != 1 {
+		t.Fatal("triggers:", n)
+	}
+}
+
+// A clean refusal of the trigger means nothing started: a later conversion may go ahead.
+func TestARefusedTriggerDoesNotBlockTheNextConversion(t *testing.T) {
+	fake := fakecam.New()
+	cam, err := camera.Open(&timingOut{FakeX100VI: fake, refuse: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cam.Close() })
+	conv := NewRawConverter(cam)
+	shot := upload(t, conv, fakecam.RAFBytes("", 0))
+	if _, err := conv.Develop(shot, false, 0, ""); !errs.Is(err, errs.CameraRefused) {
+		t.Fatal(err)
+	}
+	if cam.ConversionMayBeRunning {
+		t.Fatal("a refused trigger marked a conversion as running")
+	}
+	develop(t, NewRawConverter(cam), shot, false, "")
+}
+
+// After a timeout, a fresh converter on the same camera session is refused too.
+func TestAfterATimeoutAFreshConverterNeverTriggersAgain(t *testing.T) {
+	conv, fake, raf := setup(t)
+	shot := upload(t, conv, raf)
+	fake.StallConversion = true
+	if _, err := conv.Develop(shot, false, 300*time.Millisecond, ""); err == nil {
+		t.Fatal("no timeout")
+	}
+	fake.StallConversion = false
+	if _, err := NewRawConverter(conv.Camera).Develop(shot, false, 0, ""); err == nil || triggers(fake) != 1 {
+		t.Fatal("a fresh converter triggered again", err)
+	}
+}

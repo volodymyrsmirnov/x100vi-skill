@@ -25,6 +25,12 @@ const (
 	// maxStaleContainers is how many containers of earlier transactions are discarded before giving up.
 	// An interrupted transaction leaves at most a data container and a response behind.
 	maxStaleContainers = 4
+
+	// When the device is opened, what an earlier, interrupted process left in the bulk IN pipe is read
+	// and thrown away: reads with a short timeout until one times out, or until one of the bounds.
+	drainTimeoutMS = 100
+	maxDrainReads  = 64
+	maxDrainBytes  = 64 << 20
 )
 
 // errStaleContainers is a camera that keeps answering other transactions than the current one.
@@ -41,13 +47,46 @@ type bulkPipe interface {
 	BulkIn(p []byte) (int, error)
 }
 
-// usbFramer runs PTP transactions over a bulkPipe.
+// usbFramer runs PTP transactions over a bulkPipe. It numbers them: OpenSession is transaction 0, as
+// PTP requires, and the requests after it count from 1.
 type usbFramer struct {
 	pipe   bulkPipe
-	outMPS int // max packet size of the bulk OUT endpoint
-	inMPS  int // max packet size of the bulk IN endpoint
-	tid    uint32
+	outMPS int    // max packet size of the bulk OUT endpoint
+	inMPS  int    // max packet size of the bulk IN endpoint
+	tid    uint32 // id of the last transaction
 	buf    []byte
+}
+
+// nextTID is the transaction id of a new request. PTP sends OpenSession with id 0 and answers it with
+// 0; the first request of the session is 1.
+func (f *usbFramer) nextTID(op uint16) uint32 {
+	if op == ptp.OpOpenSession {
+		f.tid = 0
+	} else {
+		f.tid++
+	}
+	return f.tid
+}
+
+// drain reads and discards what is waiting in the bulk IN pipe, left by an earlier process that was
+// interrupted mid-transaction, so the first request does not take it for its answer. read is a bulk IN
+// transfer with a short timeout; draining stops at its first error (normally that timeout: the pipe is
+// empty) or after maxDrainReads reads or maxDrainBytes bytes. It returns the reads made and the bytes
+// thrown away.
+func (f *usbFramer) drain(read func(p []byte) (int, error)) (reads, discarded int) {
+	size := max(f.inMPS, usbReadSize)
+	if len(f.buf) < size {
+		f.buf = make([]byte, size)
+	}
+	for reads < maxDrainReads && discarded < maxDrainBytes {
+		n, err := read(f.buf[:size])
+		reads++
+		if err != nil {
+			break
+		}
+		discarded += n
+	}
+	return reads, discarded
 }
 
 func (f *usbFramer) write(p []byte) error {
@@ -63,8 +102,8 @@ func (f *usbFramer) write(p []byte) error {
 
 // transact runs one transaction. Errors are the pipe's own; the caller explains them.
 func (f *usbFramer) transact(op uint16, params []uint32, dataOut []byte) (uint16, []uint32, []byte, error) {
-	f.tid++
-	if err := f.write(commandContainer(op, f.tid, params)); err != nil {
+	tid := f.nextTID(op)
+	if err := f.write(commandContainer(op, tid, params)); err != nil {
 		return 0, nil, nil, err
 	}
 	if dataOut != nil {
@@ -77,7 +116,7 @@ func (f *usbFramer) transact(op uint16, params []uint32, dataOut []byte) (uint16
 		total := headerLen + len(dataOut)
 		chunk := mps * usbChunkPackets
 		first := min(len(dataOut), chunk-headerLen)
-		head := append(containerHeader(uint32(total), ptp.Data, op, f.tid), dataOut[:first]...)
+		head := append(containerHeader(uint32(total), ptp.Data, op, tid), dataOut[:first]...)
 		if err := f.write(head); err != nil {
 			return 0, nil, nil, err
 		}
@@ -99,16 +138,14 @@ func (f *usbFramer) transact(op uint16, params []uint32, dataOut []byte) (uint16
 		if err != nil {
 			return 0, nil, nil, err
 		}
-		// Some cameras answer the session requests with transaction id 0 (the id PTP gives OpenSession).
-		sessionZero := h.tid == 0 && (op == ptp.OpOpenSession || op == ptp.OpCloseSession)
-		if h.tid != f.tid && !sessionZero {
+		if h.tid != tid {
 			// Left over from an earlier transaction that was interrupted (a timeout, a killed process):
 			// it is not the answer to this one.
 			stale++
 			if stale > maxStaleContainers {
 				return 0, nil, nil, fmt.Errorf("%w: %d containers in a row belonged to other transactions "+
 					"(last: type %d, code 0x%04X, transaction %d; expected %d)",
-					errStaleContainers, stale, h.ctype, h.code, h.tid, f.tid)
+					errStaleContainers, stale, h.ctype, h.code, h.tid, tid)
 			}
 			continue
 		}

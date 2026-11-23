@@ -969,8 +969,12 @@ func (e *env) sandboxHelp(a *Args) error {
 
 // -- wiring --------------------------------------------------------------------------------------
 
+// jsonOption is on every command. The parser handles it in order with the other tokens, so a value
+// option directly before it (`--output --json`) is missing its value rather than taking "--json" away.
+var jsonOption = option{long: "--json", help: "print one JSON object instead of text"}
+
 func commands() []*command {
-	return []*command{
+	cmds := []*command{
 		{name: "doctor", help: "check that the camera is connected, supported and in the right USB mode"},
 		{name: "get", help: "print a recipe from the camera as JSON",
 			args:    []positional{{name: "target", opt: true, def: "live", help: "live, C1..C7, or all (default: live)"}},
@@ -1025,6 +1029,10 @@ func commands() []*command {
 				{long: "--dir", kind: optString, help: "install into this skills folder"},
 				{long: "--force", help: "replace an existing folder that is not this skill"}}},
 	}
+	for _, c := range cmds {
+		c.options = append(c.options, jsonOption)
+	}
+	return cmds
 }
 
 func (e *env) handler(name string) func(*Args) error {
@@ -1053,14 +1061,13 @@ func Main(argv []string, factory Factory, stdout, stderr io.Writer) int {
 		factory = transport.Open
 	}
 	cmds := commands()
+	// Only --json before the command name is global; after it, each command's parser handles --json in
+	// token order like any other option.
 	asJSON := false
-	var rest []string
-	for _, tok := range argv {
-		if tok == "--json" {
-			asJSON = true
-			continue
-		}
-		rest = append(rest, tok)
+	rest := argv
+	for len(rest) > 0 && rest[0] == "--json" {
+		asJSON = true
+		rest = rest[1:]
 	}
 	out := &Out{JSON: asJSON, Stdout: stdout}
 	fail := func(err error) int {
@@ -1110,13 +1117,33 @@ func Main(argv []string, factory Factory, stdout, stderr io.Writer) int {
 	}
 	args, err := cmd.parse(rest[1:])
 	if err != nil {
+		// The command line is wrong, but a caller that asked for JSON still gets the error as JSON.
+		if asksForJSON(rest[1:]) {
+			asJSON, out.JSON = true, true
+		}
 		return fail(err)
+	}
+	if args.Bool("json") {
+		asJSON, out.JSON = true, true
 	}
 	e := &env{out: out, factory: factory}
 	if err := e.handler(cmd.name)(args); err != nil {
 		return fail(err)
 	}
 	return 0
+}
+
+// asksForJSON reports whether a command's tokens include --json as an option (before any "--").
+func asksForJSON(tokens []string) bool {
+	for _, tok := range tokens {
+		if tok == "--" {
+			return false
+		}
+		if tok == "--json" {
+			return true
+		}
+	}
+	return false
 }
 
 func names(cmds []*command) []string {

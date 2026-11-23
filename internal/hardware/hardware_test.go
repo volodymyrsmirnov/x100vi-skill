@@ -21,6 +21,7 @@ import (
 
 	"github.com/volodymyrsmirnov/x100vi-skill/internal/camera"
 	"github.com/volodymyrsmirnov/x100vi-skill/internal/camera/settingsfile"
+	"github.com/volodymyrsmirnov/x100vi-skill/internal/camlock"
 	"github.com/volodymyrsmirnov/x100vi-skill/internal/exifcheck"
 	"github.com/volodymyrsmirnov/x100vi-skill/internal/library"
 	"github.com/volodymyrsmirnov/x100vi-skill/internal/model"
@@ -43,12 +44,18 @@ func TestMain(m *testing.M) {
 	}
 }
 
-// withCamera opens the camera on the main thread and runs fn there.
+// withCamera opens the camera on the main thread and runs fn there, holding the camera lock for the
+// whole session so an x100vi command run meanwhile cannot select another register in the middle of it.
 func withCamera(t *testing.T, fn func(*camera.Camera)) {
 	t.Helper()
 	if os.Getenv("X100VI_HARDWARE") != "1" {
 		t.Skip("needs a real X100VI: set X100VI_HARDWARE=1")
 	}
+	release, err := camlock.Acquire()
+	if err != nil {
+		t.Fatalf("camera lock: %v", err)
+	}
+	defer release()
 	var openErr error
 	finished := make(chan struct{})
 	panicked := make(chan any, 1)
@@ -96,8 +103,14 @@ var probe = map[string]any{
 	"noise_reduction": -4.0, "clarity": -2.0,
 }
 
+// reporter is the part of *testing.T the camera helpers use, so the fake-camera tests can watch them fail.
+type reporter interface {
+	Helper()
+	Errorf(format string, args ...any)
+}
+
 // Errors inside withCamera are reported with Errorf so the deferred restore still runs on the main thread.
-func check(t *testing.T, err error, what string) bool {
+func check(t reporter, err error, what string) bool {
 	t.Helper()
 	if err != nil {
 		t.Errorf("%s: %v", what, err)
@@ -106,7 +119,7 @@ func check(t *testing.T, err error, what string) bool {
 	return true
 }
 
-func rawRegister(t *testing.T, c *camera.Camera, slot int) map[uint16][]byte {
+func rawRegister(t reporter, c *camera.Camera, slot int) map[uint16][]byte {
 	t.Helper()
 	out := map[uint16][]byte{}
 	if !check(t, c.Session.SetU16(model.SlotSelect, slot), "select") {
@@ -166,12 +179,30 @@ var (
 )
 
 // wbMemory reads what the register remembers for every white-balance mode by selecting each mode in
-// turn, the way ClearWBMemory walks them (D-range priority off first). It changes the register's active
-// mode and D-range priority: re-apply the register's recipe afterwards.
-func wbMemory(t *testing.T, c *camera.Camera, slot int) (map[string]wbRemembered, bool) {
+// turn, the way ClearWBMemory walks them (D-range priority off first). After a complete walk the
+// register's active mode and D-range priority are changed: re-apply the register's recipe afterwards.
+// If the walk fails partway it puts back only what it changed itself (the active mode, then D-range
+// priority) and reports false; selecting a mode leaves every remembered shift and the Kelvin as they were.
+func wbMemory(t reporter, c *camera.Camera, slot int) (map[string]wbRemembered, bool) {
 	t.Helper()
-	if !check(t, c.Session.SetU16(model.SlotSelect, slot), "select") ||
-		!check(t, c.Session.SetU16(propDRP, 0), "D-range priority off") {
+	if !check(t, c.Session.SetU16(model.SlotSelect, slot), "select") {
+		return nil, false
+	}
+	activeDRP, errD := c.Session.GetU16(propDRP)
+	activeMode, errM := c.Session.GetU16(propWBMode)
+	if !check(t, errors.Join(errD, errM), "read the active WB mode and D-range priority") {
+		return nil, false
+	}
+	complete := false
+	defer func() {
+		if complete {
+			return
+		}
+		check(t, c.Session.SetU16(model.SlotSelect, slot), "select to put back the WB mode")
+		check(t, c.Session.SetU16(propWBMode, activeMode), "put back the active WB mode")
+		check(t, c.Session.SetU16(propDRP, activeDRP), "put back D-range priority")
+	}()
+	if !check(t, c.Session.SetU16(propDRP, 0), "D-range priority off") {
 		return nil, false
 	}
 	out := map[string]wbRemembered{}
@@ -191,13 +222,14 @@ func wbMemory(t *testing.T, c *camera.Camera, slot int) (map[string]wbRemembered
 		}
 		out[mode] = m
 	}
+	complete = true
 	return out, true
 }
 
 // restoreWBMemory puts back what wbMemory read. A Kelvin change zeroes the shift, so the temperature
 // goes first; switching modes stores the current shift for the mode being left, so each mode's shift is
 // written while that mode is selected. The active mode is left wherever the walk ends.
-func restoreWBMemory(t *testing.T, c *camera.Camera, slot int, mem map[string]wbRemembered) bool {
+func restoreWBMemory(t reporter, c *camera.Camera, slot int, mem map[string]wbRemembered) bool {
 	t.Helper()
 	if !check(t, c.Session.SetU16(model.SlotSelect, slot), "select") ||
 		!check(t, c.Session.SetU16(propDRP, 0), "D-range priority off") {
@@ -224,7 +256,10 @@ func restoreWBMemory(t *testing.T, c *camera.Camera, slot int, mem map[string]wb
 
 // roundTripAndRestore writes the probe recipe to a register, checks it, and puts the register back
 // exactly: its settings byte for byte and what it remembers for every white-balance mode.
-func roundTripAndRestore(t *testing.T, c *camera.Camera, slot int) {
+//
+// Nothing is written until a complete snapshot of the WB memory exists: the cleanup erases every
+// remembered shift (ClearWBMemory) and relies on that snapshot to put them back.
+func roundTripAndRestore(t reporter, c *camera.Camera, slot int) {
 	t.Helper()
 	if !check(t, c.RequireReady(), "ready") { // before the first selector write
 		return
@@ -242,21 +277,20 @@ func roundTripAndRestore(t *testing.T, c *camera.Camera, slot int) {
 		_, err := c.Write(original.ToPlain(), &slot, false)
 		return check(t, err, what)
 	}
-	var memBefore map[string]wbRemembered
+	memBefore, ok := wbMemory(t, c, slot)
+	if !ok {
+		t.Errorf("no complete snapshot of the WB memory: nothing was written, and the snapshot walk's own " +
+			"changes (active WB mode, D-range priority) were put back")
+		return
+	}
+	// A complete snapshot exists: only now arm the destructive cleanup and write the probe.
 	func() {
 		defer func() {
 			check(t, c.ClearWBMemory(slot), "clear WB memory")
 			reapply("restore")
-			if memBefore != nil {
-				restoreWBMemory(t, c, slot, memBefore)
-				reapply("re-apply the original recipe after restoring WB memory") // the original active mode
-			}
+			restoreWBMemory(t, c, slot, memBefore)
+			reapply("re-apply the original recipe after restoring WB memory") // the original active mode
 		}()
-		mem, ok := wbMemory(t, c, slot)
-		if !ok {
-			return
-		}
-		memBefore = mem
 		if _, err := c.Write(probe, &slot, false); !check(t, err, "write probe") {
 			return
 		}
@@ -271,14 +305,12 @@ func roundTripAndRestore(t *testing.T, c *camera.Camera, slot int) {
 			}
 		}
 	}()
-	if memBefore != nil {
-		memAfter, ok := wbMemory(t, c, slot)
-		reapply("re-apply the original recipe after reading WB memory")
-		if ok {
-			for _, mode := range model.WhiteBalance.Names {
-				if memAfter[mode] != memBefore[mode] {
-					t.Errorf("WB memory of %s not restored: %+v -> %+v", mode, memBefore[mode], memAfter[mode])
-				}
+	memAfter, ok := wbMemory(t, c, slot)
+	reapply("re-apply the original recipe after reading WB memory")
+	if ok {
+		for _, mode := range model.WhiteBalance.Names {
+			if memAfter[mode] != memBefore[mode] {
+				t.Errorf("WB memory of %s not restored: %+v -> %+v", mode, memBefore[mode], memAfter[mode])
 			}
 		}
 	}

@@ -214,8 +214,9 @@ func NewSession(t Transport) *Session { return &Session{T: t, described: map[uin
 
 // Transact runs one transaction. It refuses to download an object before its description was read:
 // asking an X100VI for an object it has not described first (seen with handle 0, the settings file)
-// can hang the body until its battery is removed. A handle stops counting as described once it is
-// deleted or once reading its description fails.
+// can hang the body until its battery is removed. A handle counts as described only once a reply to
+// GetObjectInfo parsed completely (ParseObjectInfo); it stops counting once it is deleted, once reading
+// its description fails, and whenever the session is opened or closed (handles belong to a session).
 func (s *Session) Transact(op uint16, params []uint32, dataOut []byte) (uint16, []uint32, []byte, error) {
 	switch op {
 	case OpGetObject:
@@ -239,13 +240,18 @@ func (s *Session) Transact(op uint16, params []uint32, dataOut []byte) (uint16, 
 	}
 	code, rparams, data, err := s.T.Transact(op, params, dataOut)
 	if op == OpGetObjectInfo && len(params) > 0 {
-		if err == nil && code == RCOK {
+		if err == nil && code == RCOK && objectInfoParses(data) {
 			s.described[params[0]] = true
 		} else {
 			delete(s.described, params[0])
 		}
 	}
 	return code, rparams, data, err
+}
+
+func objectInfoParses(d []byte) bool {
+	_, err := ParseObjectInfo(d)
+	return err == nil
 }
 
 // Check runs a transaction and turns a non-OK response into an error.
@@ -265,6 +271,7 @@ func (s *Session) Check(op uint16, params []uint32, dataOut []byte, what string)
 
 // Open opens the PTP session (transports that own the session answer OK without sending it).
 func (s *Session) Open() error {
+	clear(s.described)
 	code, _, _, err := s.Transact(OpOpenSession, []uint32{1}, nil)
 	if err != nil {
 		return err
@@ -278,6 +285,7 @@ func (s *Session) Open() error {
 
 // Close closes the session and the transport.
 func (s *Session) Close() error {
+	clear(s.described)
 	if s.open {
 		s.open = false
 		_, _, _, _ = s.Transact(OpCloseSession, nil, nil)

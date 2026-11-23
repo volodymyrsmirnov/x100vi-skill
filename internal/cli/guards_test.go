@@ -163,13 +163,10 @@ func TestPreviewLabelsCollidingOnlyInCaseAreKeptApart(t *testing.T) {
 	}
 }
 
-// holdLock takes the camera lock as another x100vi command would, with a short wait for this test.
+// holdLock takes this test's camera lock (see isolate) as another x100vi command would, with a short
+// wait for this test.
 func holdLock(t *testing.T) {
 	t.Helper()
-	dir := t.TempDir()
-	for _, v := range []string{"TMPDIR", "TMP", "TEMP"} {
-		t.Setenv(v, dir)
-	}
 	saved := camlock.Timeout
 	camlock.Timeout = 200 * time.Millisecond
 	t.Cleanup(func() { camlock.Timeout = saved })
@@ -195,10 +192,6 @@ func TestACameraCommandWaitsForAnotherOneAndThenGivesUp(t *testing.T) {
 
 func TestTheCameraLockIsReleasedAfterACommand(t *testing.T) {
 	c := newRunner(t)
-	dir := t.TempDir()
-	for _, v := range []string{"TMPDIR", "TMP", "TEMP"} {
-		t.Setenv(v, dir)
-	}
 	wantCode(t, c.run("get", "c1"), 0)
 	wantCode(t, c.run("doctor"), 0)
 	saved := camlock.Timeout
@@ -209,4 +202,59 @@ func TestTheCameraLockIsReleasedAfterACommand(t *testing.T) {
 		t.Fatalf("the lock was kept: %v", err)
 	}
 	release()
+}
+
+// --json after the command name is an option in token order: `--output --json C2` is missing the
+// output file, and must never save the live settings to a file named C2.
+func TestJSONAfterAValueOptionIsAMissingValue(t *testing.T) {
+	isolate(t)
+	dir := t.TempDir()
+	t.Chdir(dir)
+	r := runWith(t, boom(t), "get", "--output", "--json", "C2")
+	wantCode(t, r, 2)
+	mustContain(t, r.err, "--output needs a value")
+	if j := r.json(t); j["error"] != "invalid_recipe" { // the caller asked for JSON, so the error is JSON
+		t.Fatalf("%v", j)
+	}
+	if exists(filepath.Join(dir, "C2")) {
+		t.Fatal("saved to a file named C2")
+	}
+}
+
+// --json before the command name and --json after it both select JSON output.
+func TestJSONBeforeOrAfterTheCommand(t *testing.T) {
+	c := newRunner(t)
+	target := filepath.Join(t.TempDir(), "c2.json")
+	for _, argv := range [][]string{
+		{"--json", "get", "c2", "-o", target},
+		{"get", "c2", "-o", target, "--json"},
+		{"get", "--json", "c2", "-o", target},
+	} {
+		r := c.run(argv...)
+		wantCode(t, r, 0)
+		if j := r.json(t); j["saved"] != target || j["target"] != "c2" {
+			t.Fatalf("%v: %v", argv, j)
+		}
+	}
+	r := c.run("get", "c2", "-o", target)
+	wantCode(t, r, 0)
+	mustContain(t, r.out, "saved c2 to "+target)
+	if r := c.run("--json", "doctor"); r.json(t)["ready"] != true {
+		t.Fatal(r.out)
+	}
+}
+
+// Every CLI test locks a file of its own, never the real camera lock a running x100vi holds.
+func TestCLITestsUseTheirOwnCameraLock(t *testing.T) {
+	isolate(t)
+	if p := camlock.Path(); !strings.Contains(p, t.Name()) {
+		t.Fatalf("lock file %s is not this test's", p)
+	}
+}
+
+// Tests that do not call isolate still lock the test process's own file (see TestMain).
+func TestTheCLIPackageNeverLocksTheRealFile(t *testing.T) {
+	if p := camlock.Path(); p == "/tmp/x100vi-camera.lock" || !strings.Contains(p, "x100vi-cli-test") {
+		t.Fatalf("lock file %s", p)
+	}
 }

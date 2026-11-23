@@ -603,7 +603,7 @@ func (t *wpdTransport) startRead(what string, op uint16, params []uint32) (strin
 	return ctx, chunkSize(results), total, nil
 }
 
-func (t *wpdTransport) readChunk(what, ctx string, want uint32) ([]byte, int, error) {
+func (t *wpdTransport) readChunk(what, ctx string, want uint32) ([]byte, uint32, error) {
 	results, err := t.sendNew(what, func() (*values, error) {
 		v, err := newCommand(cmdRead)
 		if err != nil {
@@ -628,9 +628,11 @@ func (t *wpdTransport) readChunk(what, ctx string, want uint32) ([]byte, int, er
 	if err != nil {
 		return nil, 0, notResponding(what, err)
 	}
-	n := -1
-	if got, err := results.getUint32(mtpKey(pBytesRead)); err == nil {
-		n = int(got)
+	// NUM_BYTES_READ is required in READ_DATA results; without it the data length is unknown, since the
+	// buffer may keep the requested size. The caller ends the transfer.
+	n, err := results.getUint32(mtpKey(pBytesRead))
+	if err != nil {
+		return nil, 0, errNoByteCount(what, err)
 	}
 	return buf, n, nil
 }

@@ -45,8 +45,11 @@ const (
 
 	Table     = 0x1FD // cell i lives at Table + 4*i, signed 32-bit little endian
 	HostCells = 30    // the host-write form: 30 cells (629 bytes) with numParams = 29
-	// CameraCells is the fewest cells a profile the camera hands back may have.
+	// CameraCells is the fewest cells an as-shot profile the camera hands back may have.
 	CameraCells = 28
+	// ProfileCells is the camera's own form of the profile: 29 cells (625 bytes). A read-back after a
+	// write must be at least as long as the as-shot profile, or this when that is unknown.
+	ProfileCells = 29
 
 	CFileType, CExposure, CDR, CDRP, CFilm, CWBSource = 2, 5, 6, 7, 8, 11
 	FileTypeJPEG                                      = 7
@@ -457,7 +460,6 @@ type RawConverter struct {
 	Camera  *camera.Camera
 	Session *ptp.Session
 	AsShot  *Profile
-	stalled bool // a conversion timed out: the body may still be busy, so never trigger another
 }
 
 // NewRawConverter works through an open camera.
@@ -508,8 +510,9 @@ func joinInts(v []int) string {
 }
 
 // Develop writes a profile, verifies the camera stored it, develops, and returns the image bytes.
-// timeout <= 0 means DefaultTimeout; output "" means jpeg. After a timeout it never triggers again:
-// the body may still be converting.
+// timeout <= 0 means DefaultTimeout; output "" means jpeg. Once a conversion may still be running (the
+// trigger's outcome is unknown, or the image never arrived), no converter triggers again on this
+// camera session (camera.Camera.ConversionMayBeRunning): the body may still be converting.
 func (rc *RawConverter) Develop(profile *Profile, full bool, timeout time.Duration, output string) ([]byte, error) {
 	if timeout <= 0 {
 		timeout = DefaultTimeout
@@ -526,7 +529,7 @@ func (rc *RawConverter) Develop(profile *Profile, full bool, timeout time.Durati
 		return nil, errs.Recipe(format.Label+" output needs full resolution",
 			"The camera produces TIFF only at full size: add --full.")
 	}
-	if rc.stalled {
+	if rc.Camera.ConversionMayBeRunning {
 		return nil, errs.New(errs.ConversionFailed, "an earlier conversion on this connection never finished",
 			"Switch the camera off and on (remove the battery briefly if it will not switch off), reconnect, "+
 				"then run the command again.")
@@ -545,9 +548,13 @@ func (rc *RawConverter) Develop(profile *Profile, full bool, timeout time.Durati
 		return nil, err
 	}
 	back, sent := NewProfile(stored), NewProfile(want)
-	if back.Validate() != nil || back.Cells() < CameraCells {
-		// An empty or foreign readback would pass the comparison below, which only covers the cells
-		// both forms have.
+	minCells := ProfileCells
+	if rc.AsShot != nil && rc.AsShot.Cells() > 0 {
+		minCells = rc.AsShot.Cells()
+	}
+	if back.Validate() != nil || back.Cells() < minCells {
+		// An empty, foreign or cut-short readback would pass the comparison below, which only covers
+		// the cells both forms have.
 		return nil, errs.New(errs.ConversionFailed,
 			fmt.Sprintf("the camera answered with unreadable conversion settings (%d bytes)", len(stored)),
 			"Nothing was developed. Power-cycle the camera and try again.")
@@ -576,6 +583,11 @@ func (rc *RawConverter) Develop(profile *Profile, full bool, timeout time.Durati
 		trigger = 1
 	}
 	if err := rc.Session.SetRaw(PropTrigger, ptp.U16Bytes(trigger), "start the conversion"); err != nil {
+		// A clean refusal means nothing started. A transport error or a camera that stopped answering
+		// leaves the outcome unknown: the conversion may be running.
+		if !errs.Is(err, errs.CameraRefused) {
+			rc.Camera.ConversionMayBeRunning = true
+		}
 		return nil, err
 	}
 	deadline := time.Now().Add(timeout)
@@ -584,13 +596,13 @@ func (rc *RawConverter) Develop(profile *Profile, full bool, timeout time.Durati
 	for !found && time.Now().Before(deadline) {
 		code, _, data, err := rc.Session.Transact(ptp.OpGetObjectHandles, []uint32{0xFFFFFFFF, 0, 0}, nil)
 		if err != nil {
-			rc.stalled = true // the conversion may still be running
+			rc.Camera.ConversionMayBeRunning = true
 			return nil, err
 		}
 		if code == ptp.RCOK { // anything else: the body is still busy, ask again
 			now, err := ptp.ParseHandles(data)
 			if err != nil {
-				rc.stalled = true // the conversion may still be running
+				rc.Camera.ConversionMayBeRunning = true
 				return nil, err
 			}
 			for _, h := range now {
@@ -606,7 +618,7 @@ func (rc *RawConverter) Develop(profile *Profile, full bool, timeout time.Durati
 	}
 	if !found {
 		// Never trigger again after a timeout: the body may still be converting.
-		rc.stalled = true
+		rc.Camera.ConversionMayBeRunning = true
 		return nil, errs.New(errs.ConversionFailed,
 			fmt.Sprintf("the camera produced no image within %s s", pyG(timeout.Seconds())),
 			"Do not retry yet. Switch the camera off and on (remove the battery briefly if it "+

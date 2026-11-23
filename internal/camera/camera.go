@@ -60,6 +60,10 @@ func (i Info) AsMap() *omap.Map {
 type Camera struct {
 	Session *ptp.Session
 	Info    Info
+	// ConversionMayBeRunning is set once a RAW conversion was (or may have been) started and its result
+	// never arrived: the body may still be busy, and a second trigger was seen to hang it. Package
+	// rawconv refuses to start another conversion for the rest of this session.
+	ConversionMayBeRunning bool
 }
 
 // Open opens a PTP session on the transport and identifies the camera. On error the session and the
@@ -188,12 +192,20 @@ func code(f model.Field, slot *int) uint16 {
 	return f.Slot
 }
 
-// keyOf names the recipe setting behind a property code.
-func keyOf(p uint16, slot *int) string {
+// fieldOf is the recipe field behind a property code.
+func fieldOf(p uint16, slot *int) (model.Field, bool) {
 	for _, f := range model.Fields {
 		if code(f, slot) == p {
-			return f.Key
+			return f, true
 		}
+	}
+	return model.Field{}, false
+}
+
+// keyOf names the recipe setting behind a property code.
+func keyOf(p uint16, slot *int) string {
+	if f, ok := fieldOf(p, slot); ok {
+		return f.Key
 	}
 	return "unknown"
 }
@@ -407,18 +419,40 @@ func (c *Camera) Write(recipe map[string]any, slot *int, partial bool) ([]string
 	}
 
 	// Side effects: restore anything the recipe did not mean to change. Kelvin and shift are
-	// stored per white-balance mode, so a mode change legitimately swaps them.
+	// stored per white-balance mode, so a mode change legitimately swaps them; writing the mode the
+	// target already had changes nothing, so then they are put back like any other setting (a Kelvin
+	// change zeroes the shift, and the repair below writes it back after the Kelvin).
 	wbGroup := map[uint16]bool{}
 	for _, k := range []string{"white_balance.kelvin", "white_balance.shift_r", "white_balance.shift_b"} {
 		wbGroup[code(model.ByKey[k], slot)] = true
 	}
-	wbChanged := false
-	for _, w := range writes {
-		wbChanged = wbChanged || w.Field.Key == "white_balance.mode"
-	}
+	modeCode := code(model.ByKey["white_balance.mode"], slot)
+	wantMode, writesMode := intended[modeCode]
+	wbChanged := writesMode && wantMode != before[modeCode]
 	sideEffect := func(p uint16) bool {
 		_, isIntended := intended[p]
 		return !isIntended && !(wbChanged && wbGroup[p])
+	}
+	// A setting whose precondition is unmet in the target's state stays stored but hidden (a mono tint
+	// under a colour film, a Kelvin outside kelvin mode, an image size while quality is RAW), and the
+	// camera may refuse to write it: it is neither repaired nor reported.
+	hiddenIn := func(state map[uint16]int, p uint16) bool {
+		f, ok := fieldOf(p, slot)
+		if !ok {
+			return false
+		}
+		film := state[code(model.ByKey["film_simulation"], slot)]
+		switch f.Needs {
+		case "mono":
+			return !model.MonoSims[film]
+		case "colour":
+			return model.NoColourSims[film]
+		case "kelvin":
+			return state[modeCode] != model.WhiteBalance.Codes["kelvin"]
+		case "jpeg":
+			return state[code(model.ByKey["image_quality"], slot)] == model.ImageQuality.Codes["raw"]
+		}
+		return false
 	}
 	// Two passes: the camera refuses some settings while another one locks them (image size while
 	// quality is RAW), so a setting refused in the first pass may be accepted once the others are back.
@@ -428,7 +462,7 @@ func (c *Camera) Write(recipe map[string]any, slot *int, partial bool) ([]string
 			return nil, err
 		}
 		for _, p := range c.codes(slot) {
-			if !sideEffect(p) || now[p] == before[p] {
+			if !sideEffect(p) || now[p] == before[p] || hiddenIn(now, p) {
 				continue
 			}
 			var rerr error
@@ -462,7 +496,7 @@ func (c *Camera) Write(recipe map[string]any, slot *int, partial bool) ([]string
 	}
 	var changed []string
 	for _, p := range c.codes(slot) {
-		if sideEffect(p) && final[p] != before[p] {
+		if sideEffect(p) && final[p] != before[p] && !hiddenIn(final, p) {
 			changed = append(changed, fmt.Sprintf("%s (0x%04X) was 0x%04X, camera holds 0x%04X",
 				keyOf(p, slot), p, before[p], final[p]))
 		}
