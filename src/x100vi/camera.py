@@ -11,6 +11,9 @@ from .ptp import PTPSession, Transport, UsbTransport, pack_string
 SUPPORTED_MODEL = "X100VI"
 TESTED_FIRMWARE = ("1.31",)
 PROP_BATTERY = 0xD36B          # "NN,0,0": charge in percent as the camera reports it
+PROP_USB_MODE = 0xD16E         # read-only: 5 tether, 6 RAW conv./backup restore, 8 webcam
+USB_MODE_RAW_CONV = 6
+REGISTER_PROPS = range(0xD18E, 0xD1A5)   # the 23 settings of the selected register; 0xD1A5 is live image size
 PROFILE_PROP = 0xD185
 
 
@@ -43,6 +46,12 @@ class Camera:
         di = self.session.device_info()
         if m.SLOT_SELECT in di.props:
             mode = "raw_conv"
+            if PROP_USB_MODE in di.props:
+                try:
+                    if self.session.get_u16(PROP_USB_MODE) != USB_MODE_RAW_CONV:
+                        mode = "unknown"
+                except PTPError:
+                    pass
         elif len(di.props) <= 8:
             mode = "card_reader"
         else:
@@ -88,7 +97,7 @@ class Camera:
         self.session.set_u16(m.SLOT_SELECT, slot)
 
     def _codes(self, slot: int | None) -> list[int]:
-        return list(range(0xD18E, 0xD1A6)) if slot is not None else [f.live for f in m.FIELDS]
+        return list(REGISTER_PROPS) if slot is not None else [f.live for f in m.FIELDS]
 
     def _snapshot(self, slot: int | None) -> dict[int, int]:
         return {c: self.session.get_u16(c) for c in self._codes(slot)}

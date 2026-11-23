@@ -91,7 +91,7 @@ FIELDS = [
     Field("clarity", 0xD032, 0xD1A2, "scaled", scale=10, lo=-5, hi=5),
     # Housekeeping rather than "look": never defaulted, written only when present.
     Field("image_quality", 0xD018, 0xD18F, "enum", IMAGE_QUALITY),
-    Field("image_size", 0xD16E, 0xD18E, "enum", IMAGE_SIZE, needs="jpeg"),
+    Field("image_size", 0xD1A5, 0xD18E, "enum", IMAGE_SIZE, needs="jpeg"),
     Field("lens_modulation_optimizer", 0xD34D, 0xD1A3, "enum", ON_OFF),
     Field("color_space", 0xD00A, 0xD1A4, "enum", COLOR_SPACE),
 ]

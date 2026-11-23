@@ -30,7 +30,7 @@ PROBE = {"name": "X100VI SKILL TEST", "film_simulation": "classic_neg",
 
 def raw_register(cam, slot):
     cam.session.set_u16(m.SLOT_SELECT, slot)
-    return {c: cam.session.prop_raw(c) for c in range(0xD18D, 0xD1A6)}
+    return {c: cam.session.prop_raw(c) for c in range(0xD18D, 0xD1A5)}
 
 
 def test_camera_is_ready():

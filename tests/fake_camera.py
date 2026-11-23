@@ -54,6 +54,7 @@ class FakeX100VI:
         self.named_before: set[int] = set()
         self.wb_memory: dict[tuple, tuple[int, int]] = {}
         self.selected = 1
+        self.usb_mode = 6                 # 0xD16E: 6 is RAW conv./backup restore
         self.profile: bytes | None = None
         self.objects: dict[int, bytes] = {}
         self.next_handle = 1
@@ -92,7 +93,7 @@ class FakeX100VI:
     def _props(self) -> list[int]:
         if self.mode != "raw_conv":
             return CARD_READER_PROPS
-        return sorted({0x5005, 0x5015, 0xD183, 0xD185, 0xD18C, 0xD18D, 0xD1A5, 0xD36A, 0xD36B,
+        return sorted({0x5005, 0x5015, 0xD16E, 0xD183, 0xD185, 0xD18C, 0xD18D, 0xD36A, 0xD36B,
                        *self._by_live, *self._by_slot})
 
     def _device_info(self, params, data):
@@ -119,8 +120,8 @@ class FakeX100VI:
             return OK, pack_string(f"{self.battery},0,0")
         if code == 0xD36A:
             return OK, struct.pack("<I", self.battery // 10)
-        if code == 0xD1A5:
-            return OK, u16(7)
+        if code == 0xD16E:
+            return OK, u16(self.usb_mode)
         if code == 0xD185:
             if self.profile is None:
                 return GENERAL_ERROR, b""
@@ -157,7 +158,7 @@ class FakeX100VI:
             return OK, b""
         if code == 0xD183:
             return self._convert(struct.unpack("<H", data)[0]), b""
-        if code in (0xD1A5, 0xD36A, 0xD36B):
+        if code in (0xD16E, 0xD36A, 0xD36B):
             return INVALID_VALUE, b""
         state, f, target = self._state(code)
         return self._write_field(state, f, target, struct.unpack("<H", data)[0]), b""

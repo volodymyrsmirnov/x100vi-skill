@@ -126,6 +126,24 @@ def test_live_read_omits_image_size_while_shooting_raw_only(camera):
     assert "image_size" not in camera.read(None)
 
 
+def test_live_image_size_is_its_own_property_not_the_usb_mode_indicator(camera, fake):
+    assert m.BY_KEY["image_size"].live == 0xD1A5
+    camera.write({"image_quality": "fine", "image_size": "m_3:2"}, None, partial=True)
+    assert fake.live["image_size"] == 4 and camera.read(None)["image_size"] == "m_3:2"
+    assert fake.usb_mode == 6 and not any(code == 0xD16E for code, _ in fake.writes)
+    assert all(s["image_size"] == 7 for s in fake.slots.values())        # registers untouched
+
+
+def test_register_snapshot_does_not_include_the_live_image_size(camera):
+    assert 0xD1A5 not in camera._codes(3) and len(camera._codes(3)) == 23
+
+
+def test_a_camera_reporting_another_usb_mode_is_not_treated_as_ready(fake):
+    fake.usb_mode = 5
+    with open_camera(fake) as cam:
+        assert cam.info.mode == "unknown" and not cam.info.ready
+
+
 def test_invalid_recipe_writes_nothing(camera, fake):
     before = len(fake.writes)
     with pytest.raises(RecipeError):
