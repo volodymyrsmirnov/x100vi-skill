@@ -14,6 +14,21 @@ specifics were confirmed here. Codes and value tables were also cross-checked ag
   configuration tree. Value ranges were found by asking the camera to validate values and restoring the
   original afterwards.
 - All setting values are 16-bit; negative numbers are two's complement.
+- **Connections.** The same PTP requests travel three ways, as in FUJIFILM X RAW STUDIO:
+  - macOS: ImageCaptureCore. `ptpcamerad` keeps the camera and its PTP session; `ICCameraDevice`
+    `requestSendPTPCommand:outData:completion:` takes a full PTP command container plus the raw outgoing
+    data and returns the incoming data and the response container. Tested on hardware.
+  - Windows: Windows Portable Devices with the inbox driver. `IPortableDevice::SendCommand` with the MTP
+    vendor-extension commands (category `{4D545058-1A2E-4106-A357-771E0819FC56}`: 12 no data, 13 data to
+    read, 14 data to write, 15 read, 16 write, 17 end transfer; properties 1001 operation code, 1002
+    parameters, 1003 response code, 1006 transfer context, 1007 total size, 1008 / 1010 bytes to read /
+    write, 1012 data, 1013 optimal buffer size). Not tested on hardware.
+  - Any system: libusb, claiming the still-image interface directly. That interface can be held by one
+    process only, so on macOS `ptpcamerad` has to be stopped first, and on Windows the WinUSB driver must
+    replace the inbox one.
+- **Never download an object before describing it.** `GetObject` on handle 0 (the settings file) sent
+  without a preceding `GetObjectInfo` hung the X100VI until its battery was removed. The session layer
+  refuses that order.
 
 ## Properties
 

@@ -1,7 +1,9 @@
 """PTP session over a pluggable transport.
 
-`Transport` is one method: run a PTP transaction. `UsbTransport` speaks to a real camera
-with pyusb; tests substitute a fake camera that implements the same method.
+`Transport` is one method: run a PTP transaction. Real cameras are reached through the operating
+system's own camera service where there is one (`icc.IccTransport` on macOS, `wpd.WpdTransport` on
+Windows), or directly over libusb (`UsbTransport`, the only option on Linux). `open_transport` picks
+one. Tests substitute a fake camera that implements the same method.
 Only standard PTP requests and generic vendor transactions live here.
 """
 from __future__ import annotations
@@ -14,7 +16,14 @@ import time
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from .errors import CameraBusyError, CameraNotFoundError, PTPError, SandboxedError
+from .errors import (
+    CameraBusyError,
+    CameraNotFoundError,
+    CameraNotRespondingError,
+    PTPError,
+    SandboxedError,
+    X100VIError,
+)
 
 FUJIFILM_VENDOR_ID = 0x04CB
 CMD, DATA, RESP = 1, 2, 3
@@ -137,13 +146,23 @@ def detect_sandbox(environ=None) -> str | None:
     return None
 
 
+def sandbox_error() -> SandboxedError | None:
+    """The error to raise instead of "no camera" when an agent sandbox hides the hardware."""
+    sandbox = detect_sandbox()
+    if not sandbox:
+        return None
+    return SandboxedError(
+        f"USB is not reachable: this command is running inside the {sandbox} sandbox",
+        "This is not a camera or cable problem. Run the same command again outside the sandbox "
+        "(ask for approval to run it unsandboxed). `x100vi sandbox-help` shows how to allow it permanently.")
+
+
 _PLATFORM_HINT = {
     "darwin": "On macOS nothing else is needed.",
     "linux": "On Linux, unmount the camera in the file manager (gvfs) and make sure your user may "
              "access USB devices (a udev rule for vendor 04cb, or run with sudo).",
-    "win32": "On Windows the camera must use the WinUSB driver: install it for the camera with Zadig "
-             "(https://zadig.akeo.ie). While WinUSB is installed, Explorer and X RAW STUDIO cannot see the "
-             "camera; uninstall the driver in Device Manager to switch back.",
+    "win32": "On Windows the direct USB route needs the WinUSB driver (install it with Zadig, "
+             "https://zadig.akeo.ie); the default route through Windows Portable Devices needs no driver.",
 }
 
 
@@ -160,13 +179,9 @@ class UsbTransport:
         backend = _usb_backend()
         dev = usb.core.find(backend=backend, idVendor=FUJIFILM_VENDOR_ID)
         if dev is None:
-            sandbox = detect_sandbox()
-            if sandbox:
-                raise SandboxedError(
-                    f"USB is not reachable: this command is running inside the {sandbox} sandbox",
-                    "This is not a camera or cable problem. Run the same command again outside the sandbox "
-                    "(ask for approval to run it unsandboxed). `x100vi sandbox-help` shows how to allow it "
-                    "permanently.")
+            sandboxed = sandbox_error()
+            if sandboxed:
+                raise sandboxed
             hint = ("Connect the camera with a data-capable USB-C cable, switch it on, and make sure it is "
                     "not asleep. " + _PLATFORM_HINT.get(sys.platform, _PLATFORM_HINT["linux"]))
             try:
@@ -234,6 +249,12 @@ class UsbTransport:
         return ctype, code, b"".join(chunks)[12:length]
 
     def transact(self, op: int, params: tuple = (), data_out: bytes | None = None) -> tuple[int, tuple, bytes]:
+        try:
+            return self._transact(op, params, data_out)
+        except self._usb.USBError as e:
+            raise CameraNotRespondingError(f"USB transfer failed during request 0x{op:04X} ({e})") from e
+
+    def _transact(self, op: int, params: tuple, data_out: bytes | None) -> tuple[int, tuple, bytes]:
         self.tid = (self.tid + 1) & 0xFFFFFFFF
         payload = b"".join(struct.pack("<I", p & 0xFFFFFFFF) for p in params)
         self.ep_out.write(struct.pack("<IHHI", 12 + len(payload), CMD, op, self.tid) + payload, self.timeout)
@@ -266,15 +287,58 @@ class UsbTransport:
             self._util.dispose_resources(self.dev)
 
 
+TRANSPORTS = ("auto", "icc", "wpd", "usb")
+
+
+def open_transport(kind: str | None = None) -> Transport:
+    """Connect to the camera.
+
+    `kind` (or $X100VI_TRANSPORT): auto, icc (macOS ImageCaptureCore), wpd (Windows Portable Devices)
+    or usb (libusb). Auto uses the operating system's camera service on macOS and Windows and falls back
+    to libusb when that service cannot be used; on Linux it is libusb.
+    """
+    kind = (kind or os.environ.get("X100VI_TRANSPORT") or "auto").lower()
+    if kind not in TRANSPORTS:
+        raise X100VIError(f"unknown transport {kind!r}", f"X100VI_TRANSPORT must be one of: {', '.join(TRANSPORTS)}.")
+    if kind == "usb" or (kind == "auto" and sys.platform not in ("darwin", "win32")):
+        return UsbTransport()
+    if kind == "icc" or (kind == "auto" and sys.platform == "darwin"):
+        from .icc import IccTransport
+        native = IccTransport
+    else:
+        from .wpd import WpdTransport
+        native = WpdTransport
+    if kind != "auto":
+        return native()
+    try:
+        return native()
+    except (CameraNotFoundError, X100VIError) as first:
+        if isinstance(first, (SandboxedError, CameraBusyError, CameraNotRespondingError)):
+            raise
+        try:
+            return UsbTransport()
+        except X100VIError:
+            raise first from None
+
+
 class PTPSession:
     """Standard PTP requests on top of a transport."""
 
     def __init__(self, transport: Transport):
         self.transport = transport
         self._open = False
+        self._described: set[int] = set()
 
     def transact(self, op: int, params: tuple = (), data_out: bytes | None = None) -> tuple[int, tuple, bytes]:
-        return self.transport.transact(op, params, data_out)
+        if op == OP_GetObject and params and params[0] not in self._described:
+            # Asking an X100VI for an object it has not described first (seen with handle 0, the
+            # settings file) can hang the body until its battery is removed.
+            raise X100VIError(f"refusing to download object {params[0]} before reading its description",
+                              "This is a bug in the tool; please report it.")
+        result = self.transport.transact(op, params, data_out)
+        if op == OP_GetObjectInfo and params and result[0] == RC_OK:
+            self._described.add(params[0])
+        return result
 
     def check(self, op: int, params: tuple = (), data_out: bytes | None = None, what: str = "") -> bytes:
         code, _params, data = self.transact(op, params, data_out)

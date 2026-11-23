@@ -66,6 +66,18 @@ class SandboxedError(X100VIError):
     kind = "sandboxed"
 
 
+class CameraNotRespondingError(X100VIError):
+    """The camera stopped answering in the middle of a session."""
+
+    exit_code = 15
+    kind = "camera_not_responding"
+
+    def __init__(self, message: str, hint: str = ""):
+        super().__init__(message, hint or (
+            "Switch the camera off and on, reconnect it, and run the command again. If the power switch does "
+            "not respond, take the battery out for a few seconds."))
+
+
 class ConversionError(X100VIError):
     exit_code = 20
     kind = "conversion_failed"

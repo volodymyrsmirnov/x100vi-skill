@@ -20,6 +20,8 @@ dependencies = [
   "pyusb>=1.2.1",
   "libusb-package>=1.0.26",
   "pillow>=10.0",
+  "pyobjc-framework-ImageCaptureCore>=10.0; sys_platform == 'darwin'",
+  "comtypes>=1.4; sys_platform == 'win32'",
 ]
 
 [project.urls]

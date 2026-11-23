@@ -21,9 +21,13 @@ def pytest_collection_modifyitems(config, items):
 
 
 @pytest.fixture(autouse=True)
-def isolated_state(tmp_path, monkeypatch):
+def isolated_state(tmp_path, monkeypatch, request):
     """Automatic backups go to a temp folder, never to the developer's real state directory."""
     monkeypatch.setenv("X100VI_HOME", str(tmp_path / "state"))
+    # Unit tests never reach the OS camera services; the libusb route is the one they mock.
+    # Hardware tests keep the default (or whatever X100VI_TRANSPORT the developer set).
+    if request.node.get_closest_marker("camera") is None:
+        monkeypatch.setenv("X100VI_TRANSPORT", "usb")
     return tmp_path / "state"
 
 

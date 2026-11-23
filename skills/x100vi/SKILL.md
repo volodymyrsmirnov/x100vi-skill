@@ -169,5 +169,6 @@ and exit non-zero; the `hint` is written for the user, so pass it on.
 | 12 | `unsupported_camera` | not an X100VI |
 | 13 | `camera_busy` | another program holds the camera |
 | 14 | `sandboxed` | the command ran inside a sandbox, where USB is hidden; rerun it outside |
+| 15 | `camera_not_responding` | the camera stopped answering; ask the user to switch it off and on (or remove the battery) before anything else |
 | 20 | `conversion_failed` | the RAF could not be developed |
 | 30 | `camera_refused` | the camera rejected a request |

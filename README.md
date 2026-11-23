@@ -53,7 +53,7 @@ you to set on the body.
 - The camera's CONNECTION MODE set to **USB RAW CONV./BACKUP RESTORE** ([how](#3-set-up-the-camera-required)).
 - [uv](https://docs.astral.sh/uv/) (or pipx with Python 3.10 or newer) to install and run the tool.
 - Node.js 22.20 or later, only if you install the skill with `npx skills`.
-- macOS (tested). Linux should work; Windows needs an extra driver. See [Platforms](#platforms).
+- macOS (tested). Windows and Linux should work; see [Platforms](#platforms).
 - Optional: [exiftool](https://exiftool.org), only for `x100vi verify` and `preview --verify`.
 
 ## Install
@@ -275,11 +275,14 @@ contact sheet: x100vi-previews/contact-sheet.jpg
 
 | | Status |
 |---|---|
-| macOS | Tested on hardware. Works out of the box. |
-| Linux | Unit-tested in CI, not tested on hardware. Unmount the camera if your desktop auto-mounts it, and give your user access to USB vendor `04cb` (udev rule) or use `sudo`. |
-| Windows | Unit-tested in CI, **not tested on hardware**. libusb reaches the camera only through the WinUSB driver: install it for the camera with [Zadig](https://zadig.akeo.ie). While it is installed, Explorer and X RAW STUDIO cannot see the camera; uninstall the driver in Device Manager to switch back. Reports welcome. |
+| macOS | Tested on hardware. Talks to the camera through macOS' own camera service (ImageCaptureCore), the way X RAW STUDIO does, so nothing has to be stopped and Image Capture or Photos may stay open. |
+| Windows | Unit-tested in CI (including the Windows Portable Devices plumbing), **not tested on hardware**. Talks to the camera through Windows Portable Devices with Windows' own driver, the way X RAW STUDIO does: no extra driver needed. Reports welcome. |
+| Linux | Unit-tested in CI, not tested on hardware. Uses libusb. Unmount the camera if your desktop auto-mounts it, and give your user access to USB vendor `04cb` (udev rule) or use `sudo`. |
 
-Only one program can hold the camera: quit X RAW STUDIO, X Acquire, Image Capture, Photos and Lightroom first.
+`X100VI_TRANSPORT` chooses the connection: `auto` (default), `icc` (macOS), `wpd` (Windows) or `usb`
+(libusb on any system; on macOS it stops `ptpcamerad`, on Windows it needs the WinUSB driver from
+[Zadig](https://zadig.akeo.ie)). On Linux only one program can hold the camera at a time, so quit other
+camera apps first.
 
 ## Troubleshooting
 

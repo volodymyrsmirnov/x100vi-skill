@@ -8,7 +8,8 @@ Start with `x100vi doctor`. Every error prints a `hint`; the table adds what usu
 | 11 | `wrong_usb_mode` | The camera is in USB CARD READER or another mode | On the camera: MENU > NETWORK/USB SETTING > CONNECTION MODE > USB RAW CONV./BACKUP RESTORE, then unplug and replug. The X100VI has no tether mode; this is the only mode that exposes settings. |
 | 12 | `unsupported_camera` | A different Fujifilm body is connected | Only the X100VI is supported. Other bodies use different property codes; writing to them is refused on purpose. |
 | 14 | `sandboxed` | The command ran inside the agent's sandbox, which hides USB devices | Nothing is wrong with the camera. The agent must run the same command outside the sandbox; approve its request. See "Agent sandboxes" below. |
-| 13 | `camera_busy` | Another program has claimed the camera | Quit FUJIFILM X RAW STUDIO, X Acquire, Image Capture, Photos, Lightroom, Capture One. On Linux, unmount the camera in the file manager. On Windows, see below. |
+| 13 | `camera_busy` | Another program has claimed the camera | Quit FUJIFILM X RAW STUDIO, X Acquire, Lightroom, Capture One. On Linux, unmount the camera in the file manager. |
+| 15 | `camera_not_responding` | The camera stopped answering mid-session | Switch it off and on and reconnect. If the power switch does nothing, take the battery out for a few seconds. Do not retry before that. |
 | 2 | `invalid_recipe` | A recipe value or command argument is not acceptable | The message names the setting and the allowed values. Nothing was sent to the camera. |
 | 4 | `slot_occupied` | The custom setting already holds a recipe | Ask whether to replace it or use another slot. `--overwrite` saves the old contents first. |
 | 5 | `missing_dependency` | `exiftool` is not installed | Only `verify` and `preview --verify` need it. |
@@ -89,13 +90,16 @@ first use.
 
 ## Platforms
 
-- **macOS**: works out of the box. The system's `ptpcamerad` grabs cameras; the tool ends it before
-  connecting and macOS restarts it on demand.
-- **Linux**: expected to work, not tested on hardware. The desktop may auto-mount the camera (gvfs):
-  unmount it first. Your user needs access to the USB device: a udev rule for vendor `04cb`, or `sudo`.
-- **Windows**: not tested on hardware. libusb can only reach the camera through the WinUSB driver, which
-  you install for the camera with [Zadig](https://zadig.akeo.ie). While WinUSB is installed, Explorer and
-  X RAW STUDIO no longer see the camera; uninstall the driver in Device Manager to switch back.
+- **macOS**: works out of the box, through macOS' camera service (ImageCaptureCore). Other camera apps
+  may stay open.
+- **Windows**: not tested on hardware. Works through Windows Portable Devices with Windows' own driver;
+  no extra driver is needed. The camera should appear in Explorer under This PC.
+- **Linux**: expected to work, not tested on hardware. Uses libusb. The desktop may auto-mount the camera
+  (gvfs): unmount it first. Your user needs access to the USB device: a udev rule for vendor `04cb`, or
+  `sudo`.
+- `X100VI_TRANSPORT=usb` forces libusb anywhere. On macOS it stops `ptpcamerad` first; on Windows it needs
+  the WinUSB driver from [Zadig](https://zadig.akeo.ie), and while that is installed Explorer and
+  X RAW STUDIO no longer see the camera.
 
 ## What is never done
 

@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from . import model as m
 from . import settingsfile
 from .errors import MODE_MENU, RAW_CONV_MODE, PTPError, RecipeError, UnsupportedCameraError, WrongModeError
-from .ptp import PTPSession, Transport, UsbTransport, pack_string
+from .ptp import PTPSession, Transport, open_transport, pack_string
 
 SUPPORTED_MODEL = "X100VI"
 TESTED_FIRMWARE = ("1.31",)
@@ -248,7 +248,7 @@ class Camera:
 @contextmanager
 def open_camera(transport: Transport | None = None):
     """Connect, open a PTP session, identify the camera, and always release it afterwards."""
-    session = PTPSession(transport if transport is not None else UsbTransport())
+    session = PTPSession(transport if transport is not None else open_transport())
     session.open()
     try:
         yield Camera(session)
