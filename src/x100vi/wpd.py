@@ -23,7 +23,7 @@ CLIENT = "{204D9F0C-2292-4080-9F42-40664E70F859}"      # WPD_CLIENT_INFORMATION_
 
 CMD_WITHOUT_DATA, CMD_DATA_TO_READ, CMD_DATA_TO_WRITE, CMD_READ, CMD_WRITE, CMD_END = 12, 13, 14, 15, 16, 17
 P_OPERATION_CODE, P_OPERATION_PARAMS, P_RESPONSE_CODE = 1001, 1002, 1003
-P_CONTEXT, P_TOTAL_SIZE, P_BYTES_TO_READ, P_BYTES_TO_WRITE = 1006, 1007, 1008, 1010
+P_CONTEXT, P_TOTAL_SIZE, P_BYTES_TO_READ, P_BYTES_TO_WRITE, P_BYTES_WRITTEN = 1006, 1007, 1008, 1010, 1011
 P_DATA, P_OPTIMAL_BUFFER = 1012, 1013
 C_CATEGORY, C_ID, C_HRESULT = 1001, 1002, 1003
 CLIENT_QOS, CLIENT_ACCESS = 8, 9
@@ -188,14 +188,20 @@ class WpdTransport:
         start = self._send(values, what)
         context = start.GetStringValue(self._key(MTP_EXT, P_CONTEXT))
         chunk = self._chunk(start)
-        view = memoryview(data)
-        for pos in range(0, len(data), chunk):
+        view, pos = memoryview(data), 0
+        while pos < len(data):
             piece = view[pos:pos + chunk].tobytes()
             values = self._command(CMD_WRITE)
             values.SetStringValue(self._key(MTP_EXT, P_CONTEXT), context)
             values.SetUnsignedIntegerValue(self._key(MTP_EXT, P_BYTES_TO_WRITE), len(piece))
             self._set_buffer(values, P_DATA, piece)
-            self._send(values, what)
+            results = self._send(values, what)
+            written = results.GetUnsignedIntegerValue(self._key(MTP_EXT, P_BYTES_WRITTEN))
+            if not 0 < written <= len(piece):
+                raise CameraNotRespondingError(
+                    f"Windows accepted {written} of {len(piece)} bytes during {what} "
+                    f"({pos} of {len(data)} sent so far)")
+            pos += written           # a short write is resent from where it stopped
         return self._end(context, what), (), b""
 
     def _end(self, context: str, what: str) -> int:
