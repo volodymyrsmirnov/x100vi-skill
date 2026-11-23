@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from .errors import CameraBusyError, CameraNotFoundError, PTPError
+from .errors import CameraBusyError, CameraNotFoundError, PTPError, SandboxedError
 
 FUJIFILM_VENDOR_ID = 0x04CB
 CMD, DATA, RESP = 1, 2, 3
@@ -122,6 +122,21 @@ def _usb_backend():
     return None
 
 
+def detect_sandbox(environ=None) -> str | None:
+    """Name of the agent sandbox this process runs in, if it announces one.
+
+    Sandboxes hide USB devices, so "no camera" inside one says nothing about the camera.
+    """
+    env = os.environ if environ is None else environ
+    if env.get("CODEX_SANDBOX"):                       # e.g. "seatbelt" on macOS
+        return "Codex"
+    if env.get("CODEX_SANDBOX_NETWORK_DISABLED") == "1":
+        return "Codex"
+    if env.get("X100VI_SANDBOX"):                      # for other agents and for tests
+        return env["X100VI_SANDBOX"]
+    return None
+
+
 _PLATFORM_HINT = {
     "darwin": "On macOS nothing else is needed.",
     "linux": "On Linux, unmount the camera in the file manager (gvfs) and make sure your user may "
@@ -142,12 +157,26 @@ class UsbTransport:
         self._usb, self._util = usb.core, usb.util
         self.timeout = timeout_ms
         self.tid = 0
-        dev = usb.core.find(backend=_usb_backend(), idVendor=FUJIFILM_VENDOR_ID)
+        backend = _usb_backend()
+        dev = usb.core.find(backend=backend, idVendor=FUJIFILM_VENDOR_ID)
         if dev is None:
-            raise CameraNotFoundError(
-                "no Fujifilm camera found on USB",
-                "Connect the camera with a data-capable USB-C cable, switch it on, and make sure it is "
-                "not asleep. " + _PLATFORM_HINT.get(sys.platform, _PLATFORM_HINT["linux"]))
+            sandbox = detect_sandbox()
+            if sandbox:
+                raise SandboxedError(
+                    f"USB is not reachable: this command is running inside the {sandbox} sandbox",
+                    "This is not a camera or cable problem. Run the same command again outside the sandbox "
+                    "(ask for approval to run it unsandboxed). `x100vi sandbox-help` shows how to allow it "
+                    "permanently.")
+            hint = ("Connect the camera with a data-capable USB-C cable, switch it on, and make sure it is "
+                    "not asleep. " + _PLATFORM_HINT.get(sys.platform, _PLATFORM_HINT["linux"]))
+            try:
+                nothing_visible = not any(True for _ in usb.core.find(find_all=True, backend=backend))
+            except (usb.core.USBError, ValueError):
+                nothing_visible = True
+            if nothing_visible:
+                hint += (" No USB device of any kind is visible: if an AI agent ran this command, it may be "
+                         "sandboxed, in which case it must be run again outside the sandbox.")
+            raise CameraNotFoundError("no Fujifilm camera found on USB", hint)
         self.dev = dev
         try:
             cfg = dev.get_active_configuration()
@@ -186,8 +215,9 @@ class UsbTransport:
                 time.sleep(0.3)
         raise CameraBusyError(
             f"cannot take control of the camera's USB interface ({last})",
-            "Quit FUJIFILM X RAW STUDIO, X Acquire, Image Capture, Photos, Lightroom or any other app "
-            "that talks to the camera, then try again. " + _PLATFORM_HINT.get(sys.platform, _PLATFORM_HINT["linux"]))
+            "Wait for any other x100vi command to finish, and quit FUJIFILM X RAW STUDIO, X Acquire, "
+            "Image Capture, Photos, Lightroom or any other app that talks to the camera, then try again. "
+            + _PLATFORM_HINT.get(sys.platform, _PLATFORM_HINT["linux"]))
 
     def _read_container(self) -> tuple[int, int, bytes]:
         size = max(self.ep_in.wMaxPacketSize, 1 << 20)

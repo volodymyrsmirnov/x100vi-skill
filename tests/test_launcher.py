@@ -98,3 +98,8 @@ def test_a_failed_install_stops_with_the_installers_error(tmp_path):
     stub(tmp_path / "bin", "uv", 'if [ "$2" = "dir" ]; then exit 1; fi; echo "network unreachable" >&2; exit 2\n')
     r = run("doctor", path=tmp_path / "bin", home=tmp_path)
     assert r.returncode == 2 and "network unreachable" in r.stderr and r.stdout == ""
+
+
+def test_launcher_uses_no_here_documents():
+    # A here-document makes the shell create a temp file, which a command sandbox refuses.
+    assert "<<" not in LAUNCHER.read_text()

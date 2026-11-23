@@ -37,6 +37,24 @@ this launcher.**
 - If a command or option described here is reported as unknown, the installed tool is older than this
   skill: run the launcher with `--self-update`, then retry.
 
+## Camera commands must run outside the sandbox
+
+Your shell commands may run in a sandbox. A sandbox hides USB devices, so inside one the camera looks
+absent however well it is connected. Every command that talks to the camera needs to run **outside** the
+sandbox: `doctor`, `get`, `set`, `backup`, `restore`, `preview`.
+
+- Request unsandboxed execution for these commands from the very first call, giving the reason "needs USB
+  access to the camera". In Codex that is an escalated-permissions request for the command; in Claude Code
+  it is running the command with the sandbox disabled.
+- If a command answers `sandboxed` (exit 14), run the **same command** again outside the sandbox. Do the
+  same if it answers `camera_not_found` while the user says the camera is connected.
+- Never tell the user to check the cable, the power or the USB mode on the strength of a sandboxed result.
+  It says nothing about the camera.
+- `validate`, `recipes` and `schema` need no camera and are fine inside the sandbox.
+- If the user is tired of approving, tell them `x100vi sandbox-help` prints the settings that allow these
+  commands permanently (Codex rules, Claude Code settings). Applying them is the user's decision: do not
+  edit agent configuration yourself.
+
 ## Before you start
 
 1. Check the tool: `x100vi --version`.
@@ -136,5 +154,6 @@ and exit non-zero; the `hint` is written for the user, so pass it on.
 | 11 | `wrong_usb_mode` | camera is not in USB RAW CONV./BACKUP RESTORE |
 | 12 | `unsupported_camera` | not an X100VI |
 | 13 | `camera_busy` | another program holds the camera |
+| 14 | `sandboxed` | the command ran inside a sandbox, where USB is hidden; rerun it outside |
 | 20 | `conversion_failed` | the RAF could not be developed |
 | 30 | `camera_refused` | the camera rejected a request |

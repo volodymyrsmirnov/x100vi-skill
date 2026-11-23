@@ -59,6 +59,13 @@ class CameraBusyError(X100VIError):
     kind = "camera_busy"
 
 
+class SandboxedError(X100VIError):
+    """The command runs inside an agent's sandbox, where USB devices are invisible."""
+
+    exit_code = 14
+    kind = "sandboxed"
+
+
 class ConversionError(X100VIError):
     exit_code = 20
     kind = "conversion_failed"

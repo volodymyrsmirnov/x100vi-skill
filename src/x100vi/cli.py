@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import shutil
 import sys
 from collections.abc import Callable
@@ -18,6 +17,7 @@ from . import model as m
 from .camera import open_camera
 from .errors import MODE_MENU, RecipeError, SlotOccupiedError, X100VIError
 from .ptp import Transport
+from .sandbox import codex_home
 
 TransportFactory = Callable[[], Transport] | None
 ON_BODY = "ISO, exposure compensation, focus and drive settings are not reachable over USB; set them on the camera."
@@ -322,7 +322,7 @@ def cmd_install_skill(a, out: Out, tf: TransportFactory) -> int:
     if a.claude:
         targets.append(Path.home() / ".claude" / "skills" / "x100vi")
     if a.codex:
-        targets.append(Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "skills" / "x100vi")
+        targets.append(codex_home() / "skills" / "x100vi")
     if a.dir:
         targets.append(Path(a.dir).expanduser() / "x100vi")
     if not targets:
@@ -353,6 +353,43 @@ def cmd_install_skill(a, out: Out, tf: TransportFactory) -> int:
     out.emit({"installed": done, "linked": a.link},
              [f"skill {'linked' if a.link else 'installed'} at {p}" for p in done]
              + ["Start a new Claude Code or Codex session to pick it up."])
+    return 0
+
+
+def cmd_sandbox_help(a, out: Out, tf: TransportFactory) -> int:
+    from . import sandbox
+    from .ptp import detect_sandbox
+
+    rules = sandbox.codex_rules()
+    rules_path = sandbox.codex_rules_path()
+    settings = sandbox.claude_settings()
+    written = None
+    if a.write_codex_rules:
+        rules_path.parent.mkdir(parents=True, exist_ok=True)
+        rules_path.write_text(rules, encoding="utf-8")
+        written = str(rules_path)
+    inside = detect_sandbox()
+    result = {"running_in_sandbox": inside,
+              "codex": {"rules_file": str(rules_path), "rules": rules, "written": written},
+              "claude_code": {"settings_file": "~/.claude/settings.json", "settings": settings}}
+    lines = [
+        "Agents can run commands in a sandbox that hides USB devices. Camera commands must run outside it.",
+        f"This command is running inside the {inside} sandbox." if inside else "This command is not sandboxed.",
+        "",
+        "In the moment: approve the agent's request to run the x100vi command outside the sandbox.",
+        "",
+        f"Codex, permanently: save the rules below as {rules_path} and restart Codex",
+        "  (or run `x100vi sandbox-help --write-codex-rules`). Reading and previewing then run without",
+        "  a prompt; `set` and `restore` still ask before each run.",
+        "",
+        rules,
+        "Claude Code (only if you turned its sandbox on): merge this into ~/.claude/settings.json:",
+        "",
+        json.dumps(settings, indent=2),
+    ]
+    if written:
+        lines = [f"wrote {written}; restart Codex to load it", "", *lines]
+    out.emit(result, lines)
     return 0
 
 
@@ -417,6 +454,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("name", nargs="?")
 
     add("schema", cmd_schema, "print the recipe JSON schema")
+
+    sp = add("sandbox-help", cmd_sandbox_help,
+             "show how to let an agent run camera commands outside its sandbox (USB is hidden inside one)")
+    sp.add_argument("--write-codex-rules", action="store_true",
+                    help="write the Codex rules file (~/.codex/rules/x100vi.rules)")
 
     sp = add("install-skill", cmd_install_skill, "install the agent skill for Claude Code and/or Codex")
     sp.add_argument("--claude", action="store_true", help="install into ~/.claude/skills")

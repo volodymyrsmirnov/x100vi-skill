@@ -31,6 +31,12 @@ find_tool() {
 
 install_tool() {
     # $1 is "fresh" or "update". Installer output goes to stderr so stdout stays clean for --json.
+    if [ -n "${CODEX_SANDBOX:-}" ] || [ "${CODEX_SANDBOX_NETWORK_DISABLED:-}" = "1" ] || [ -n "${X100VI_SANDBOX:-}" ]; then
+        # echo, not a here-document: the shell needs a temp file for those, which a sandbox denies
+        echo "error: the x100vi tool is not installed yet and cannot be installed from inside the sandbox (no network there)" >&2
+        echo "hint: Run this same command again outside the sandbox (ask for approval to run it unsandboxed). The camera also needs that: USB is not reachable from a sandbox." >&2
+        exit 14
+    fi
     if command -v uv >/dev/null 2>&1; then
         echo "x100vi: installing the x100vi tool with uv from $SOURCE ..." >&2
         if [ "$1" = "update" ]; then
@@ -46,10 +52,8 @@ install_tool() {
             pipx install "$SOURCE" >&2
         fi
     else
-        cat >&2 <<MSG
-error: the x100vi tool is not installed, and neither uv nor pipx is available to install it
-hint: Install uv from https://docs.astral.sh/uv/getting-started/installation/ and run this again, or install the tool yourself: pipx install $SOURCE
-MSG
+        echo "error: the x100vi tool is not installed, and neither uv nor pipx is available to install it" >&2
+        echo "hint: Install uv from https://docs.astral.sh/uv/getting-started/installation/ and run this again, or install the tool yourself: pipx install $SOURCE" >&2
         exit 127
     fi
 }
