@@ -17,7 +17,9 @@ X100VI_HARDWARE=1 uv run pytest tests/hardware -v   # needs a real X100VI, see t
   camera; do not add a value without evidence (see `docs/protocol.md`).
 - `src/x100vi/camera.py` - identity checks, read, verified write.
 - `src/x100vi/rawconv.py` - RAF upload and in-camera conversion.
-- `src/x100vi/ptp.py` - PTP over USB; the only module that touches hardware.
+- `src/x100vi/ptp.py` - PTP over USB; the only module that touches hardware. Also detects agent sandboxes,
+  where USB is invisible.
+- `src/x100vi/sandbox.py` - generates the Codex rules and Claude Code settings shown by `sandbox-help`.
 - `src/x100vi/cli.py` - commands; text for people, `--json` for agents.
 - `tests/fake_camera.py` - a software X100VI reproducing the real body's quirks. New camera behaviour
   goes here first, with a test.

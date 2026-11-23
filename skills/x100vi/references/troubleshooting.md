@@ -7,12 +7,29 @@ Start with `x100vi doctor`. Every error prints a `hint`; the table adds what usu
 | 10 | `camera_not_found` | No Fujifilm device on USB | Use a data cable (some USB-C cables only charge), switch the camera on, wake it if it slept. If the camera is in USB WEBCAM mode it is not reachable. |
 | 11 | `wrong_usb_mode` | The camera is in USB CARD READER or another mode | On the camera: MENU > NETWORK/USB SETTING > CONNECTION MODE > USB RAW CONV./BACKUP RESTORE, then unplug and replug. The X100VI has no tether mode; this is the only mode that exposes settings. |
 | 12 | `unsupported_camera` | A different Fujifilm body is connected | Only the X100VI is supported. Other bodies use different property codes; writing to them is refused on purpose. |
+| 14 | `sandboxed` | The command ran inside the agent's sandbox, which hides USB devices | Nothing is wrong with the camera. The agent must run the same command outside the sandbox; approve its request. See "Agent sandboxes" below. |
 | 13 | `camera_busy` | Another program has claimed the camera | Quit FUJIFILM X RAW STUDIO, X Acquire, Image Capture, Photos, Lightroom, Capture One. On Linux, unmount the camera in the file manager. On Windows, see below. |
 | 2 | `invalid_recipe` | A recipe value or command argument is not acceptable | The message names the setting and the allowed values. Nothing was sent to the camera. |
 | 4 | `slot_occupied` | The custom setting already holds a recipe | Ask whether to replace it or use another slot. `--overwrite` saves the old contents first. |
 | 5 | `missing_dependency` | `exiftool` is not installed | Only `verify` and `preview --verify` need it. |
 | 20 | `conversion_failed` | The RAF could not be developed | See the next section. |
 | 30 | `camera_refused` | The camera answered a request with an error | Run `x100vi doctor`; if it persists, power-cycle the camera. |
+
+## Agent sandboxes
+
+Codex, and Claude Code when its sandbox is switched on, can run shell commands in a sandbox. USB devices
+are invisible there, and so is the network.
+
+- The tool recognises Codex's sandbox and answers `sandboxed` (exit 14) instead of "no camera found".
+  Where it cannot tell (Claude Code's sandbox sets no marker), `camera_not_found` adds a note when no USB
+  device of any kind is visible.
+- **In the moment**: the agent asks to run the command outside the sandbox; approve it.
+- **Permanently**: `x100vi sandbox-help` prints ready-made settings for this machine.
+  - Codex: a rules file for `~/.codex/rules/x100vi.rules` (`x100vi sandbox-help --write-codex-rules` writes
+    it; restart Codex). Reading and previewing then run unsandboxed without a prompt; `set`, `restore` and
+    `--self-update` still ask each time.
+  - Claude Code: a `sandbox.excludedCommands` fragment for `~/.claude/settings.json`.
+- The first-use install of the tool also fails in a sandbox (no network); the launcher says so with exit 14.
 
 ## The tool will not install or run
 

@@ -151,6 +151,24 @@ handles:
 It asks before writing to the camera, never replaces a custom setting that already holds a recipe without
 your say-so, and tells you when a preview could not show a setting because of how the photo was taken.
 
+### Agent sandboxes
+
+Codex (and Claude Code, if you turned its sandbox on) can run commands in a sandbox, and a sandbox hides
+USB devices. The camera commands therefore have to run **outside** it. The skill tells the agent to ask for
+that, and the tool reports `sandboxed` instead of a misleading "no camera found", so normally you just
+approve the request when it appears.
+
+To stop being asked, run this once in a terminal:
+
+```bash
+x100vi sandbox-help
+```
+
+It prints ready-made settings for your machine: a Codex rules file (`--write-codex-rules` saves it to
+`~/.codex/rules/x100vi.rules`; restart Codex afterwards) and a `sandbox.excludedCommands` fragment for
+Claude Code's `~/.claude/settings.json`. With the Codex rules, reading and previewing run without a
+prompt, while `set` and `restore` still ask before each run.
+
 ## Using the tool directly
 
 Every command that talks to the camera (`doctor`, `get`, `set`, `backup`, `restore`, `preview`) needs it
@@ -167,6 +185,7 @@ x100vi set live desert-gold                  # apply a starter recipe to the cur
 x100vi backup -o my-camera.json              # everything in one file
 x100vi restore my-camera.json --yes          # write C1-C7 back
 x100vi preview shot.RAF --as-shot -r desert-gold street-mono my-look.json
+x100vi sandbox-help                          # how to let an agent reach the camera from its sandbox
 ```
 
 Add `--json` to any command for machine-readable output. `x100vi COMMAND --help` lists every option.

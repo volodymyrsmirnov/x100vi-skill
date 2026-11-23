@@ -23,6 +23,11 @@ function Find-Tool {
 
 function Install-Tool([bool]$Update) {
     # Installer output goes to the error stream so standard output stays clean for --json.
+    if ($env:CODEX_SANDBOX -or $env:CODEX_SANDBOX_NETWORK_DISABLED -eq "1" -or $env:X100VI_SANDBOX) {
+        [Console]::Error.WriteLine("error: the x100vi tool is not installed yet and cannot be installed from inside the sandbox (no network there)")
+        [Console]::Error.WriteLine("hint: Run this same command again outside the sandbox (ask for approval to run it unsandboxed). The camera also needs that: USB is not reachable from a sandbox.")
+        exit 14
+    }
     if (Get-Command uv -ErrorAction SilentlyContinue) {
         [Console]::Error.WriteLine("x100vi: installing the x100vi tool with uv from $Source ...")
         if ($Update) { & uv tool install --force --reinstall $Source 1>&2 } else { & uv tool install $Source 1>&2 }
