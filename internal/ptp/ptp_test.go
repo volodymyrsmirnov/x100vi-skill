@@ -203,3 +203,26 @@ func TestOpeningOrClosingTheSessionForgetsDescriptions(t *testing.T) {
 		})
 	}
 }
+
+// OpenSession and CloseSession sent through Check (not only through Open and Close) forget every
+// description too: handles belong to a session.
+func TestSessionOperationsSentThroughCheckForgetDescriptions(t *testing.T) {
+	for _, op := range []uint16{ptp.OpOpenSession, ptp.OpCloseSession} {
+		session, fake := open(t)
+		if _, err := session.Check(ptp.OpGetObjectInfo, []uint32{0}, nil, "describe"); err != nil {
+			t.Fatal(err)
+		}
+		var params []uint32
+		if op == ptp.OpOpenSession {
+			params = []uint32{1}
+		}
+		if _, err := session.Check(op, params, nil, "session"); err != nil {
+			t.Fatal(err)
+		}
+		counts := sent(fake)
+		_, err := session.Check(ptp.OpGetObject, []uint32{0}, nil, "download")
+		if err == nil || !strings.Contains(err.Error(), "before reading its description") || counts[ptp.OpGetObject] != 0 {
+			t.Fatalf("0x%04X: %v, sent %v", op, err, counts)
+		}
+	}
+}

@@ -78,3 +78,33 @@ func TestReadInCardReaderModeExplainsTheMode(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A description cut short (here 12 bytes: storage, format, protection, size) is the camera's fault, not
+// the tool's: Read says so and never asks for the file.
+func TestATruncatedDescriptionIsUnreadableNotABug(t *testing.T) {
+	fake := fakecam.New()
+	s := ptp.NewSession(fake)
+	if err := s.Open(); err != nil {
+		t.Fatal(err)
+	}
+	downloads := 0
+	fake.Intercept = func(op uint16, params []uint32, data []byte, next func() (uint16, []byte)) (uint16, []byte) {
+		code, d := next()
+		switch op {
+		case ptp.OpGetObjectInfo:
+			return code, d[:12]
+		case ptp.OpGetObject:
+			downloads++
+		}
+		return code, d
+	}
+	_, err := settingsfile.Read(s)
+	e, ok := errs.As(err)
+	if !ok || e.Kind != errs.General || e.Message != "the camera sent an unreadable description of its settings file" ||
+		strings.Contains(e.Hint, "bug") {
+		t.Fatalf("got %v (%+v)", err, e)
+	}
+	if downloads != 0 {
+		t.Fatal("asked for the file after an unreadable description")
+	}
+}

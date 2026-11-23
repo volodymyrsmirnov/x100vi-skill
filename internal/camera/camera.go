@@ -60,11 +60,15 @@ func (i Info) AsMap() *omap.Map {
 type Camera struct {
 	Session *ptp.Session
 	Info    Info
-	// ConversionMayBeRunning is set once a RAW conversion was (or may have been) started and its result
-	// never arrived: the body may still be busy, and a second trigger was seen to hang it. Package
-	// rawconv refuses to start another conversion for the rest of this session.
-	ConversionMayBeRunning bool
 }
+
+// ConversionMayBeRunning reports that a RAW conversion on this camera's session may still be running
+// (see ptp.Session.ConversionMayBeRunning). The flag lives on the session, so every Camera sharing it
+// sees it.
+func (c *Camera) ConversionMayBeRunning() bool { return c.Session.ConversionMayBeRunning }
+
+// MarkConversionMayBeRunning records that a conversion on this session may still be running.
+func (c *Camera) MarkConversionMayBeRunning() { c.Session.ConversionMayBeRunning = true }
 
 // Open opens a PTP session on the transport and identifies the camera. On error the session and the
 // transport are already closed.
@@ -366,6 +370,15 @@ func (c *Camera) Write(recipe map[string]any, slot *int, partial bool) ([]string
 		intended[p] = v
 	}
 	log := []string{}
+	filmCode := code(model.ByKey["film_simulation"], slot)
+	tint := []uint16{code(model.ByKey["monochromatic.warm_cool"], slot), code(model.ByKey["monochromatic.magenta_green"], slot)}
+	film, haveFilm := 0, false
+	for _, w := range writes {
+		if w.Field.Key == "film_simulation" {
+			film, haveFilm = w.Wire, true
+			break
+		}
+	}
 	_, hasName := recipe["name"]
 	name, _ := recipe["name"].(string)
 	if slot != nil && (hasName || !partial) {
@@ -374,19 +387,39 @@ func (c *Camera) Write(recipe map[string]any, slot *int, partial bool) ([]string
 		if err := c.Session.SetRaw(model.SlotName, ptp.PackString(name), "write the register name"); err != nil {
 			return nil, err
 		}
+		// The seeding also copies a monochromatic tint, which stays stored (hidden) under a colour film
+		// where no write below or repair can reach it. Put the register's own tint back now: it can only
+		// be written while a B&W film is selected, so through Acros. The recipe's own film write follows;
+		// without one, the register's original film goes back at once (and the repair pass checks it).
+		seeded := false
+		for _, p := range tint {
+			v, err := c.Session.GetU16(p)
+			if err != nil {
+				return nil, err
+			}
+			seeded = seeded || v != before[p]
+		}
+		if seeded {
+			if err := c.Session.SetU16(filmCode, model.FilmSimulation.Codes["acros"]); err != nil {
+				return nil, err
+			}
+			for _, p := range tint {
+				if err := c.Session.SetU16(p, before[p]); err != nil {
+					return nil, err
+				}
+				intend(p, before[p])
+			}
+			if !haveFilm {
+				if err := c.Session.SetU16(filmCode, before[filmCode]); err != nil && !refused(err) {
+					return nil, err
+				} // a refusal is retried by the repair pass, then reported
+			}
+		}
 	}
 	// Monochromatic tint stays stored (hidden) under a colour sim and can only be written
 	// while a B&W sim is selected. A full recipe for a colour sim clears it via Acros.
-	film, haveFilm := 0, false
-	for _, w := range writes {
-		if w.Field.Key == "film_simulation" {
-			film, haveFilm = w.Wire, true
-			break
-		}
-	}
-	tint := []uint16{code(model.ByKey["monochromatic.warm_cool"], slot), code(model.ByKey["monochromatic.magenta_green"], slot)}
 	if !partial && haveFilm && !model.MonoSims[film] && (before[tint[0]] != 0 || before[tint[1]] != 0) {
-		if err := c.Session.SetU16(code(model.ByKey["film_simulation"], slot), model.FilmSimulation.Codes["acros"]); err != nil {
+		if err := c.Session.SetU16(filmCode, model.FilmSimulation.Codes["acros"]); err != nil {
 			return nil, err
 		}
 		for _, p := range tint {
@@ -396,6 +429,12 @@ func (c *Camera) Write(recipe map[string]any, slot *int, partial bool) ([]string
 			intend(p, 0)
 		}
 	}
+	// White balance: the camera keeps a shift per mode and recalls it when that mode is selected, and a
+	// Kelvin change then zeroes the shift. A partial recipe that switches mode without giving the shift
+	// keeps the recalled one: read it right after the mode write and write it again after the Kelvin.
+	modeCode := code(model.ByKey["white_balance.mode"], slot)
+	var recalled []uint16
+	recalledValue := map[uint16]int{}
 	for _, w := range writes {
 		p := code(w.Field, slot)
 		var expect int
@@ -416,6 +455,28 @@ func (c *Camera) Write(recipe map[string]any, slot *int, partial bool) ([]string
 		}
 		intend(p, expect)
 		log = append(log, w.Field.Key)
+		switch {
+		case partial && w.Field.Key == "white_balance.mode" && w.Wire != before[modeCode]:
+			for _, k := range []string{"white_balance.shift_r", "white_balance.shift_b"} {
+				if model.Get(recipe, k) != nil {
+					continue
+				}
+				sp := code(model.ByKey[k], slot)
+				v, err := c.Session.GetU16(sp)
+				if err != nil {
+					return nil, err
+				}
+				recalled = append(recalled, sp)
+				recalledValue[sp] = v
+				intend(sp, v) // verified like the recipe's own values
+			}
+		case w.Field.Key == "white_balance.kelvin":
+			for _, sp := range recalled {
+				if err := c.Session.SetU16(sp, recalledValue[sp]); err != nil {
+					return nil, err
+				}
+			}
+		}
 	}
 
 	// Side effects: restore anything the recipe did not mean to change. Kelvin and shift are
@@ -426,7 +487,6 @@ func (c *Camera) Write(recipe map[string]any, slot *int, partial bool) ([]string
 	for _, k := range []string{"white_balance.kelvin", "white_balance.shift_r", "white_balance.shift_b"} {
 		wbGroup[code(model.ByKey[k], slot)] = true
 	}
-	modeCode := code(model.ByKey["white_balance.mode"], slot)
 	wantMode, writesMode := intended[modeCode]
 	wbChanged := writesMode && wantMode != before[modeCode]
 	sideEffect := func(p uint16) bool {

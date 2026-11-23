@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -12,6 +13,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/volodymyrsmirnov/x100vi-skill/internal/errs"
 	"github.com/volodymyrsmirnov/x100vi-skill/internal/ptp"
 )
 
@@ -62,11 +64,14 @@ func TestTimeouts(t *testing.T) {
 }
 
 // fakePipe is a USB endpoint pair: it records what is written and answers reads from a queue of
-// transfers.
+// transfers. With the queue empty, a read times out at once.
 type fakePipe struct {
 	writes [][]byte
 	reads  [][]byte
 	err    error
+
+	longReads int             // BulkIn calls (the transport's normal timeout)
+	timeouts  []time.Duration // what each BulkInTimeout call was given
 }
 
 func (p *fakePipe) BulkOut(b []byte) (int, error) {
@@ -78,8 +83,18 @@ func (p *fakePipe) BulkOut(b []byte) (int, error) {
 }
 
 func (p *fakePipe) BulkIn(b []byte) (int, error) {
+	p.longReads++
+	return p.next(b)
+}
+
+func (p *fakePipe) BulkInTimeout(b []byte, timeout time.Duration) (int, error) {
+	p.timeouts = append(p.timeouts, timeout)
+	return p.next(b)
+}
+
+func (p *fakePipe) next(b []byte) (int, error) {
 	if len(p.reads) == 0 {
-		return 0, errors.New("timeout")
+		return 0, fmt.Errorf("%w: nothing to read", errBulkTimeout)
 	}
 	next := p.reads[0]
 	n := copy(b, next)
@@ -323,18 +338,33 @@ func TestUSBZeroIDIsNotTheAnswerToOtherRequests(t *testing.T) {
 	}
 }
 
+// fakeClock is a clock that moves only when told to.
+type fakeClock struct{ t time.Time }
+
+func (c *fakeClock) now() time.Time          { return c.t }
+func (c *fakeClock) advance(d time.Duration) { c.t = c.t.Add(d) }
+func newFakeClock() *fakeClock               { return &fakeClock{t: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)} }
+func timedOut() (int, error)                 { return 0, fmt.Errorf("%w: test", errBulkTimeout) }
+func countReads(read func([]byte) (int, error)) (func([]byte) (int, error), *[]int) {
+	var sizes []int
+	return func(p []byte) (int, error) {
+		sizes = append(sizes, len(p))
+		return read(p)
+	}, &sizes
+}
+
 // drain throws away what an interrupted process left in the pipe, so the first request reads its own
 // answer.
 func TestUSBDrainDiscardsStaleData(t *testing.T) {
 	stale := container(ptp.Data, 0x1009, 7, bytes.Repeat([]byte{0xEE}, usbReadSize+10))
 	pipe := &fakePipe{reads: [][]byte{stale[:usbReadSize], stale[usbReadSize:], {}, container(ptp.Resp, ptp.RCOK, 7, nil)}}
 	f := usbFramer{pipe: pipe, outMPS: 512, inMPS: 512}
-	reads, discarded := f.drain(pipe.BulkIn)
-	if reads != 5 || discarded != len(stale)+12 { // four transfers, then the timeout
-		t.Fatalf("drain = %d reads, %d bytes", reads, discarded)
+	discarded, err := f.drain(pipe.BulkIn, defaultDrainLimits)
+	if err != nil || discarded != int64(len(stale)+12) {
+		t.Fatalf("drain = %d bytes, %v", discarded, err)
 	}
-	if len(pipe.reads) != 0 {
-		t.Fatalf("%d transfers left", len(pipe.reads))
+	if len(pipe.reads) != 0 || len(pipe.writes) != 0 {
+		t.Fatalf("%d transfers left, %d writes", len(pipe.reads), len(pipe.writes))
 	}
 	pipe.reads = [][]byte{container(ptp.Resp, ptp.RCOK, 0, nil)}
 	if code, _, _, err := f.transact(ptp.OpOpenSession, []uint32{1}, nil); err != nil || code != ptp.RCOK {
@@ -342,31 +372,224 @@ func TestUSBDrainDiscardsStaleData(t *testing.T) {
 	}
 }
 
-func TestUSBDrainOfAnEmptyPipeReadsOnce(t *testing.T) {
+// An empty pipe costs one one-packet read.
+func TestUSBDrainOfAnEmptyPipeReadsOnePacket(t *testing.T) {
 	pipe := &fakePipe{}
 	f := usbFramer{pipe: pipe, outMPS: 512, inMPS: 512}
-	if reads, discarded := f.drain(pipe.BulkIn); reads != 1 || discarded != 0 {
-		t.Fatalf("drain = %d reads, %d bytes", reads, discarded)
+	read, sizes := countReads(pipe.BulkIn)
+	if discarded, err := f.drain(read, defaultDrainLimits); err != nil || discarded != 0 {
+		t.Fatalf("drain = %d bytes, %v", discarded, err)
+	}
+	if !reflect.DeepEqual(*sizes, []int{512}) {
+		t.Fatalf("reads of %v bytes", *sizes)
 	}
 }
 
-func TestUSBDrainIsBounded(t *testing.T) {
-	// A pipe that never times out: small transfers stop at the read bound, full ones at the byte bound.
+// staleStream is a camera still sending an object of total bytes from an interrupted GetObject, at
+// rate bytes per second of the fake clock, then going quiet. pauseAt makes one large read time out
+// once (a camera that stalls briefly; usbfs reports no data for it) when that many bytes have gone.
+type staleStream struct {
+	clock   *fakeClock
+	left    int64
+	rate    int64
+	pauseAt int64
+	sent    int64
+	paused  bool
+}
+
+func (s *staleStream) read(p []byte) (int, error) {
+	if s.pauseAt > 0 && !s.paused && s.sent >= s.pauseAt && len(p) > 512 {
+		s.paused = true
+		s.clock.advance(drainTimeoutMS * time.Millisecond)
+		return timedOut()
+	}
+	if s.left == 0 {
+		s.clock.advance(drainTimeoutMS * time.Millisecond)
+		return timedOut()
+	}
+	n := min(int64(len(p)), s.left)
+	s.left -= n
+	s.sent += n
+	s.clock.advance(time.Duration(n) * time.Second / time.Duration(s.rate))
+	return int(n), nil
+}
+
+// A full-size TIFF left behind by an interrupted GetObject is well past the old 64 MiB bound: drain
+// reads all of it, and the next request gets its own answer.
+func TestUSBDrainEmptiesALargeStaleObject(t *testing.T) {
+	const total = 250 << 20 // over 245 MB
+	for _, pause := range []int64{0, 70 << 20} {
+		clock := newFakeClock()
+		s := &staleStream{clock: clock, left: total, rate: 35 << 20, pauseAt: pause} // USB 2.0 speed
+		pipe := &fakePipe{}
+		f := usbFramer{pipe: pipe, outMPS: 512, inMPS: 512, clock: clock.now}
+		read, sizes := countReads(s.read)
+		discarded, err := f.drain(read, defaultDrainLimits)
+		if err != nil || discarded != total {
+			t.Fatalf("pause at %d: drain = %d bytes, %v", pause, discarded, err)
+		}
+		// It ends with a large read that times out and a one-packet read that confirms it.
+		n := len(*sizes)
+		if (*sizes)[n-2] != usbReadSize || (*sizes)[n-1] != 512 {
+			t.Fatalf("pause at %d: last reads %v", pause, (*sizes)[n-2:])
+		}
+		if len(pipe.writes) != 0 {
+			t.Fatalf("pause at %d: %d writes while draining", pause, len(pipe.writes))
+		}
+		pipe.reads = [][]byte{container(ptp.Resp, ptp.RCOK, 0, nil)}
+		if code, _, _, err := f.transact(ptp.OpOpenSession, []uint32{1}, nil); err != nil || code != ptp.RCOK {
+			t.Fatalf("pause at %d: OpenSession after draining = %#x %v", pause, code, err)
+		}
+	}
+}
+
+// A pipe that never goes quiet stops at the byte budget or the time budget.
+func TestUSBDrainStopsAtItsBudget(t *testing.T) {
 	for _, tc := range []struct {
-		size      int
-		wantReads int
-	}{{size: 512, wantReads: maxDrainReads}, {size: 4 * usbReadSize, wantReads: maxDrainBytes / usbReadSize}} {
+		name    string
+		size    int           // bytes per read
+		perRead time.Duration // clock time per read
+	}{
+		{"bytes (fast camera)", usbReadSize, 20 * time.Millisecond}, // 1 GiB after 20 s
+		{"time (slow camera)", usbReadSize, 100 * time.Millisecond}, // 60 s after 600 MiB
+		{"time (zero-length packets)", 0, 100 * time.Millisecond},   // nothing, forever
+		{"time (single packets)", 512, 1 * time.Millisecond},        // 60 000 tiny reads
+	} {
+		clock := newFakeClock()
 		calls := 0
 		read := func(p []byte) (int, error) {
 			calls++
+			clock.advance(tc.perRead)
 			return min(len(p), tc.size), nil
 		}
-		f := usbFramer{outMPS: 512, inMPS: 512}
-		reads, discarded := f.drain(read)
-		if reads != tc.wantReads || calls != tc.wantReads || discarded > maxDrainBytes {
-			t.Fatalf("transfers of %d: drain = %d reads (%d calls), %d bytes", tc.size, reads, calls, discarded)
+		f := usbFramer{outMPS: 512, inMPS: 512, clock: clock.now}
+		discarded, err := f.drain(read, defaultDrainLimits)
+		if !errors.Is(err, errDrainBudget) {
+			t.Fatalf("%s: drain = %d bytes, %v", tc.name, discarded, err)
+		}
+		elapsed := clock.t.Sub(newFakeClock().t)
+		if discarded > defaultDrainLimits.bytes+usbReadSize || elapsed > defaultDrainLimits.time+tc.perRead {
+			t.Fatalf("%s: drained %d bytes in %v (%d reads)", tc.name, discarded, elapsed, calls)
+		}
+		if discarded < defaultDrainLimits.bytes && elapsed < defaultDrainLimits.time {
+			t.Fatalf("%s: stopped early: %d bytes in %v", tc.name, discarded, elapsed)
 		}
 	}
+}
+
+// clearStale lets the first request through only when the pipe is empty. Otherwise it releases the
+// device before any request is sent and reports a camera that is not responding.
+func TestUSBClearStale(t *testing.T) {
+	broken := errors.New("no such device")
+	for _, tc := range []struct {
+		name  string
+		read  func(clock *fakeClock) func([]byte) (int, error)
+		cause error
+	}{
+		{"empty pipe", func(*fakeClock) func([]byte) (int, error) {
+			return func([]byte) (int, error) { return timedOut() }
+		}, nil},
+		{"budget exhausted", func(c *fakeClock) func([]byte) (int, error) {
+			return func(p []byte) (int, error) { c.advance(time.Second); return len(p), nil }
+		}, errDrainBudget},
+		{"transport error at once", func(*fakeClock) func([]byte) (int, error) {
+			return func([]byte) (int, error) { return 0, broken }
+		}, broken},
+		{"transport error while draining", func(*fakeClock) func([]byte) (int, error) {
+			calls := 0
+			return func(p []byte) (int, error) {
+				if calls++; calls > 3 {
+					return 0, broken
+				}
+				return len(p), nil
+			}
+		}, broken},
+	} {
+		clock := newFakeClock()
+		pipe := &fakePipe{}
+		f := usbFramer{pipe: pipe, outMPS: 512, inMPS: 512, clock: clock.now}
+		released := 0
+		err := f.clearStale(tc.read(clock), defaultDrainLimits, func() { released++ })
+		if len(pipe.writes) != 0 {
+			t.Fatalf("%s: %d requests sent", tc.name, len(pipe.writes))
+		}
+		if tc.cause == nil {
+			if err != nil || released != 0 {
+				t.Fatalf("%s: err = %v, released %d times", tc.name, err, released)
+			}
+			continue
+		}
+		e, ok := errs.As(err)
+		if !ok || e.Kind != errs.NotResponding || !errors.Is(err, tc.cause) || released != 1 ||
+			e.Message != "the camera is still sending data from an earlier, interrupted command" ||
+			e.Hint != "Switch the camera off and on, reconnect, then run the command again." {
+			t.Fatalf("%s: err = %v (%#v), released %d times", tc.name, err, err, released)
+		}
+	}
+}
+
+// CloseSession's reply gets closeReplyTimeout in all, not the transport's full timeout per read.
+func TestUSBCloseSessionDoesNotWaitLong(t *testing.T) {
+	// No reply at all: one short read, which times out.
+	clock := newFakeClock()
+	pipe := &fakePipe{}
+	f := &usbFramer{pipe: pipe, outMPS: 512, inMPS: 512, tid: 4, clock: clock.now}
+	if _, _, _, err := f.transact(ptp.OpCloseSession, nil, nil); !errors.Is(err, errBulkTimeout) {
+		t.Fatalf("no reply: err = %v", err)
+	}
+	if pipe.longReads != 0 || !reflect.DeepEqual(pipe.timeouts, []time.Duration{closeReplyTimeout}) {
+		t.Fatalf("no reply: %d full-timeout reads, short reads %v", pipe.longReads, pipe.timeouts)
+	}
+
+	// A camera that trickles an answer to another transaction: the reads share one deadline.
+	clock = newFakeClock()
+	trickle := &trickPipe{clock: clock, data: container(ptp.Data, 0x1009, 3, make([]byte, 4096))}
+	f = &usbFramer{pipe: trickle, outMPS: 512, inMPS: 512, tid: 4, clock: clock.now}
+	start := clock.t
+	if _, _, _, err := f.transact(ptp.OpCloseSession, nil, nil); !errors.Is(err, errBulkTimeout) {
+		t.Fatalf("trickle: err = %v", err)
+	}
+	if elapsed := clock.t.Sub(start); elapsed > closeReplyTimeout {
+		t.Fatalf("trickle: waited %v", elapsed)
+	}
+	for i, d := range trickle.timeouts {
+		if d <= 0 || d > closeReplyTimeout-time.Duration(i)*time.Second {
+			t.Fatalf("trickle: read %d given %v (all: %v)", i, d, trickle.timeouts)
+		}
+	}
+
+	// A matching reply is taken as before; other requests keep the full timeout.
+	pipe = &fakePipe{reads: [][]byte{container(ptp.Resp, ptp.RCOK, 0, nil), container(ptp.Resp, ptp.RCOK, 5, nil)}}
+	f = &usbFramer{pipe: pipe, outMPS: 512, inMPS: 512, tid: 4}
+	if code, _, _, err := f.transact(ptp.OpCloseSession, nil, nil); err != nil || code != ptp.RCOK {
+		t.Fatalf("matching reply: %#x %v", code, err)
+	}
+	if pipe.longReads != 0 || len(pipe.timeouts) != 2 {
+		t.Fatalf("matching reply: %d full-timeout reads, short reads %v", pipe.longReads, pipe.timeouts)
+	}
+	pipe.reads = [][]byte{container(ptp.Resp, ptp.RCOK, 6, nil)}
+	if code, _, _, err := f.transact(ptp.OpGetDeviceInfo, nil, nil); err != nil || code != ptp.RCOK || pipe.longReads != 1 {
+		t.Fatalf("next request: %#x %v, %d full-timeout reads", code, err, pipe.longReads)
+	}
+}
+
+// trickPipe sends data a few bytes per read, a second of the fake clock apiece.
+type trickPipe struct {
+	fakePipe
+	clock *fakeClock
+	data  []byte
+}
+
+func (p *trickPipe) BulkInTimeout(b []byte, timeout time.Duration) (int, error) {
+	p.timeouts = append(p.timeouts, timeout)
+	if timeout < time.Second {
+		p.clock.advance(timeout)
+		return timedOut()
+	}
+	p.clock.advance(time.Second)
+	n := copy(b, p.data[:min(len(p.data), 8)])
+	p.data = p.data[n:]
+	return n, nil
 }
 
 func TestUSBReportsPipeErrors(t *testing.T) {

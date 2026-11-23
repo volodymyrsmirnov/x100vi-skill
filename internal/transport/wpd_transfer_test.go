@@ -21,6 +21,7 @@ type fakeWPD struct {
 	pad       bool
 	noCountAt int // NUM_BYTES_READ missing from this read (1-based; 0: never)
 	overCount int // NUM_BYTES_READ larger than the buffer, from this read on (1-based; 0: never)
+	overWant  int // a buffer and NUM_BYTES_READ larger than requested, at this read (1-based; 0: never)
 
 	startCtx   string
 	startErr   error
@@ -62,6 +63,11 @@ func (f *fakeWPD) readChunk(what, ctx string, want uint32) ([]byte, uint32, erro
 	n := uint32(len(part))
 	if f.overCount > 0 && f.reads >= f.overCount {
 		n = uint32(len(buf) + 1)
+	}
+	if f.reads == f.overWant {
+		// A buffer that holds more than was asked for, all of it claimed as data.
+		buf = append(append([]byte(nil), buf...), make([]byte, int(want)+5-len(buf))...)
+		n = uint32(len(buf))
 	}
 	return buf, n, nil
 }
@@ -205,6 +211,12 @@ func TestWPDReadEndsTheTransferOnEveryFailure(t *testing.T) {
 			"read failed"},
 		{"byte count", &fakeWPD{startCtx: "ctx", total: 3000, chunk: 1000, chunks: split(pattern(3000), 1000), overCount: 2},
 			"1001 bytes read"},
+		{"byte count past the request", &fakeWPD{startCtx: "ctx", total: 3000, chunk: 1000,
+			chunks: split(pattern(3000), 1000), overWant: 2}, "1005 bytes read during request 0x1009, more than the 1000"},
+		{"byte count past the request, last chunk", &fakeWPD{startCtx: "ctx", total: 2500, chunk: 1000,
+			chunks: split(pattern(2500), 1000), pad: true, overWant: 3}, "505 bytes read during request 0x1009, more than the 500"},
+		{"byte count past the request, unknown size", &fakeWPD{startCtx: "ctx", total: wpdUnknownSize64, chunk: 1000,
+			chunks: split(pattern(3000), 1000), overWant: 1}, "more than the 1000 asked for"},
 		{"unknown size chunk", &fakeWPD{startCtx: "ctx", total: wpdUnknownSize64, chunk: 1000,
 			chunks: split(pattern(3000), 1000), readErrAt: 3}, "read failed"},
 		{"no byte count", &fakeWPD{startCtx: "ctx", total: 3000, chunk: 1000, chunks: split(pattern(3000), 1000),

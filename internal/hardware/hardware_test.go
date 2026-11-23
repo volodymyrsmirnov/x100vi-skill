@@ -13,10 +13,12 @@ package hardware
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/volodymyrsmirnov/x100vi-skill/internal/camera"
@@ -178,11 +180,31 @@ var (
 	propKelvin = model.ByKey["white_balance.kelvin"].Slot
 )
 
+// selectWBMode selects a white-balance mode and reads it back: a body that acknowledges the write but
+// stays in another mode would otherwise make the shifts read (or written) next belong to that mode.
+func selectWBMode(t reporter, c *camera.Camera, mode string) bool {
+	t.Helper()
+	want := model.WhiteBalance.Codes[mode]
+	if !check(t, c.Session.SetU16(propWBMode, want), "select WB "+mode) {
+		return false
+	}
+	got, err := c.Session.GetU16(propWBMode)
+	if !check(t, err, "read back WB mode after selecting "+mode) {
+		return false
+	}
+	if got != want {
+		t.Errorf("selected WB %s (0x%04X), but the register reads back 0x%04X", mode, want, got)
+		return false
+	}
+	return true
+}
+
 // wbMemory reads what the register remembers for every white-balance mode by selecting each mode in
-// turn, the way ClearWBMemory walks them (D-range priority off first). After a complete walk the
-// register's active mode and D-range priority are changed: re-apply the register's recipe afterwards.
-// If the walk fails partway it puts back only what it changed itself (the active mode, then D-range
-// priority) and reports false; selecting a mode leaves every remembered shift and the Kelvin as they were.
+// turn, the way ClearWBMemory walks them (D-range priority off first), and reads every selection back.
+// After a complete walk the register's active mode and D-range priority are changed: re-apply the
+// register's recipe afterwards. If the walk fails partway it tries to put back only what it changed
+// itself (the active mode, then D-range priority), reads both back and reports by value whatever is not
+// back, then returns false; selecting a mode leaves every remembered shift and the Kelvin as they were.
 func wbMemory(t reporter, c *camera.Camera, slot int) (map[string]wbRemembered, bool) {
 	t.Helper()
 	if !check(t, c.Session.SetU16(model.SlotSelect, slot), "select") {
@@ -195,19 +217,16 @@ func wbMemory(t reporter, c *camera.Camera, slot int) (map[string]wbRemembered, 
 	}
 	complete := false
 	defer func() {
-		if complete {
-			return
+		if !complete {
+			rollBackWalk(t, c, slot, activeMode, activeDRP)
 		}
-		check(t, c.Session.SetU16(model.SlotSelect, slot), "select to put back the WB mode")
-		check(t, c.Session.SetU16(propWBMode, activeMode), "put back the active WB mode")
-		check(t, c.Session.SetU16(propDRP, activeDRP), "put back D-range priority")
 	}()
 	if !check(t, c.Session.SetU16(propDRP, 0), "D-range priority off") {
 		return nil, false
 	}
 	out := map[string]wbRemembered{}
 	for _, mode := range model.WhiteBalance.Names {
-		if !check(t, c.Session.SetU16(propWBMode, model.WhiteBalance.Codes[mode]), "select WB "+mode) {
+		if !selectWBMode(t, c, mode) {
 			return nil, false
 		}
 		var m wbRemembered
@@ -226,6 +245,38 @@ func wbMemory(t reporter, c *camera.Camera, slot int) (map[string]wbRemembered, 
 	return out, true
 }
 
+// rollBackWalk puts back the active WB mode and D-range priority after a failed snapshot walk, then
+// reads both back and reports exactly which of them the register does not hold.
+func rollBackWalk(t reporter, c *camera.Camera, slot, mode, drp int) {
+	t.Helper()
+	errS := c.Session.SetU16(model.SlotSelect, slot)
+	errM := c.Session.SetU16(propWBMode, mode)
+	errD := c.Session.SetU16(propDRP, drp)
+	var notBack []string
+	for _, v := range []struct {
+		what     string
+		code     uint16
+		want     int
+		writeErr error
+	}{{"active WB mode", propWBMode, mode, errM}, {"D-range priority", propDRP, drp, errD}} {
+		got, err := c.Session.GetU16(v.code)
+		switch {
+		case errS != nil || err != nil:
+			notBack = append(notBack, fmt.Sprintf("%s (wanted 0x%04X; could not read it back: %v)", v.what, v.want,
+				errors.Join(errS, v.writeErr, err)))
+		case got != v.want:
+			detail := ""
+			if v.writeErr != nil {
+				detail = fmt.Sprintf("; the write failed: %v", v.writeErr)
+			}
+			notBack = append(notBack, fmt.Sprintf("%s (wanted 0x%04X, register holds 0x%04X%s)", v.what, v.want, got, detail))
+		}
+	}
+	if len(notBack) > 0 {
+		t.Errorf("after the failed WB snapshot walk, C%d could not be put back: %s", slot, strings.Join(notBack, "; "))
+	}
+}
+
 // restoreWBMemory puts back what wbMemory read. A Kelvin change zeroes the shift, so the temperature
 // goes first; switching modes stores the current shift for the mode being left, so each mode's shift is
 // written while that mode is selected. The active mode is left wherever the walk ends.
@@ -241,7 +292,7 @@ func restoreWBMemory(t reporter, c *camera.Camera, slot int, mem map[string]wbRe
 		if !known {
 			continue
 		}
-		if !check(t, c.Session.SetU16(propWBMode, model.WhiteBalance.Codes[mode]), "select WB "+mode) {
+		if !selectWBMode(t, c, mode) {
 			ok = false
 			continue
 		}
@@ -279,8 +330,8 @@ func roundTripAndRestore(t reporter, c *camera.Camera, slot int) {
 	}
 	memBefore, ok := wbMemory(t, c, slot)
 	if !ok {
-		t.Errorf("no complete snapshot of the WB memory: nothing was written, and the snapshot walk's own " +
-			"changes (active WB mode, D-range priority) were put back")
+		t.Errorf("no complete snapshot of the WB memory, so the probe recipe was not written " +
+			"(anything the walk could not put back is reported above)")
 		return
 	}
 	// A complete snapshot exists: only now arm the destructive cleanup and write the probe.

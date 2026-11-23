@@ -13,6 +13,8 @@ import (
 
 	"github.com/volodymyrsmirnov/x100vi-skill/internal/camlock"
 	"github.com/volodymyrsmirnov/x100vi-skill/internal/errs"
+	"github.com/volodymyrsmirnov/x100vi-skill/internal/fakecam"
+	"github.com/volodymyrsmirnov/x100vi-skill/internal/rawconv"
 )
 
 // jsonKeys lists the top-level keys of one JSON object in the order they were written.
@@ -100,6 +102,44 @@ func TestRestoreSlotsMustBeCustomSettingsListedOnce(t *testing.T) {
 	r = runWith(t, boom(t), "restore", writeRecipe(t, dir, map[string]any{"slots": map[string]any{"c3": gold, "C3": gold}}, "case.json"), "--yes")
 	wantCode(t, r, 2)
 	mustContain(t, r.err, "lists C3 twice")
+}
+
+// The same key written twice in the JSON text is a duplicate too, although decoding keeps only one: it
+// is refused before connecting, with --yes or without.
+func TestRestoreRefusesALiteralDuplicateSlotKey(t *testing.T) {
+	isolate(t)
+	dir := t.TempDir()
+	g, err := json.Marshal(gold)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, _ := json.Marshal(map[string]any{"name": "OTHER", "film_simulation": "velvia"})
+	for name, text := range map[string]string{
+		"twice":       `{"live": ` + string(g) + `, "slots": {"C1": ` + string(g) + `, "C2": ` + string(g) + `, "C1": ` + string(other) + `}}`,
+		"slots twice": `{"slots": {"C1": ` + string(g) + `}, "slots": {"C2": ` + string(g) + `}}`,
+	} {
+		path := filepath.Join(dir, strings.ReplaceAll(name, " ", "-")+".json")
+		if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		for _, extra := range [][]string{{"--yes"}, {}} {
+			r := runWith(t, boom(t), append([]string{"restore", path}, extra...)...)
+			wantCode(t, r, 2)
+			if name == "twice" {
+				mustContain(t, r.err, "lists C1 twice (as 'C1' and 'C1')")
+			} else {
+				mustContain(t, r.err, `has "slots" twice`)
+			}
+		}
+	}
+	// keys that are not custom settings are still explained by restore itself
+	path := filepath.Join(dir, "bad.json")
+	if err := os.WriteFile(path, []byte(`{"slots": {"C9": `+string(g)+`, "C9": `+string(g)+`}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := runWith(t, boom(t), "restore", path, "--yes")
+	wantCode(t, r, 2)
+	mustContain(t, r.err, "unknown target 'C9'")
 }
 
 func TestPreviewPathsAreUniqueForTheWholeBatch(t *testing.T) {
@@ -256,5 +296,142 @@ func TestCLITestsUseTheirOwnCameraLock(t *testing.T) {
 func TestTheCLIPackageNeverLocksTheRealFile(t *testing.T) {
 	if p := camlock.Path(); p == "/tmp/x100vi-camera.lock" || !strings.Contains(p, "x100vi-cli-test") {
 		t.Fatalf("lock file %s", p)
+	}
+}
+
+// An unknown command is reported as JSON when --json comes before or after it, and as text when --json
+// only follows "--" (where it is not an option).
+func TestUnknownCommandErrorIsJSONWithJSONOnEitherSide(t *testing.T) {
+	isolate(t)
+	for _, argv := range [][]string{{"--json", "gte"}, {"gte", "--json"}, {"gte", "c1", "--json"}} {
+		r := runWith(t, boom(t), argv...)
+		wantCode(t, r, errs.InvalidRecipe.Exit)
+		j := r.json(t)
+		if j["error"] != "invalid_recipe" || !strings.Contains(j["message"].(string), "unknown command 'gte'") ||
+			!strings.Contains(j["message"].(string), "Did you mean 'get'?") {
+			t.Fatalf("%v: %v", argv, j)
+		}
+		mustContain(t, r.err, "error: unknown command 'gte'")
+	}
+	r := runWith(t, boom(t), "gte", "--", "--json")
+	wantCode(t, r, errs.InvalidRecipe.Exit)
+	if r.out != "" {
+		t.Fatalf("--json after -- printed JSON: %q", r.out)
+	}
+	mustContain(t, r.err, "unknown command 'gte'")
+}
+
+// foldsUnicode reports whether dir's file system treats the composed and decomposed spellings of a
+// name as one file (APFS and HFS+ on macOS do).
+func foldsUnicode(t *testing.T, dir, composed, decomposed string) bool {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, composed), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(filepath.Join(dir, composed))
+	a, errA := os.Stat(filepath.Join(dir, composed))
+	b, errB := os.Stat(filepath.Join(dir, decomposed))
+	return errA == nil && errB == nil && os.SameFile(a, b)
+}
+
+// Two RAFs named café.RAF, one spelled composed and one decomposed, in two folders: on macOS both
+// output names are one file, so one render would silently replace the other. The second gets -2.
+// Where the file system keeps the spellings apart, a stat that folds them stands in for macOS.
+func TestPreviewNamesThatAreOneFileOnlyToTheFileSystemAreKeptApart(t *testing.T) {
+	c := newRunner(t)
+	dir := t.TempDir()
+	composed, decomposed := "caf\u00e9", "cafe\u0301" // one name to macOS, two byte strings
+	if !foldsUnicode(t, dir, composed+".probe", decomposed+".probe") {
+		saved := statOutput
+		statOutput = func(name string) (os.FileInfo, error) { // the composed spelling's file, when there is one
+			if fi, err := os.Stat(strings.ReplaceAll(name, decomposed, composed)); err == nil {
+				return fi, nil
+			}
+			return os.Stat(name)
+		}
+		t.Cleanup(func() { statOutput = saved })
+	}
+	var rafs []string
+	for i, stem := range []string{composed, decomposed} {
+		sub := filepath.Join(dir, []string{"a", "b"}[i])
+		if err := os.MkdirAll(sub, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		rafs = append(rafs, makeRAF(t, filepath.Join(sub, stem+".RAF"), ""))
+	}
+	out := filepath.Join(dir, "p")
+	r := c.run(append([]string{"preview"}, append(rafs, "--as-shot", "-o", out, "--json", "--no-sheet")...)...)
+	wantCode(t, r, 0)
+	renders := r.json(t)["renders"].([]any)
+	if len(renders) != 2 {
+		t.Fatal(renders)
+	}
+	first, second := get(renders[0], "file").(string), get(renders[1], "file").(string)
+	if filepath.Base(first) != composed+"__as-shot.jpg" || filepath.Base(second) != decomposed+"__as-shot-2.jpg" {
+		t.Fatalf("%q %q", filepath.Base(first), filepath.Base(second))
+	}
+	a, errA := statOutput(first)
+	b, errB := statOutput(second)
+	if errA != nil || errB != nil || os.SameFile(a, b) || a.Size() == 0 || b.Size() == 0 {
+		t.Fatalf("renders share a file or are empty: %v %v", errA, errB)
+	}
+	// the decomposed spelling without a suffix was not left behind as an empty file
+	entries, err := os.ReadDir(out)
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("%v %v", entries, err)
+	}
+}
+
+// Output files are created before connecting; when the command fails, those it created and never
+// wrote are removed again, while files that were already there and finished renders are kept.
+func TestPreviewRemovesUnwrittenOutputFilesOnFailure(t *testing.T) {
+	isolate(t)
+	dir := t.TempDir()
+	raf := makeRAF(t, filepath.Join(dir, "DSCF0001.RAF"), "")
+	out := filepath.Join(dir, "p")
+	if err := os.MkdirAll(out, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := filepath.Join(out, "DSCF0001__everyday.jpg") // from an earlier run
+	if err := os.WriteFile(old, []byte("earlier"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// no camera: nothing was rendered, so nothing new is left behind and the old file is untouched
+	r := runWith(t, failing(errs.New(errs.CameraNotFound, "no camera", "")), "preview", raf, "--as-shot",
+		"-r", "everyday", "-o", out, "--no-sheet")
+	wantCode(t, r, errs.CameraNotFound.Exit)
+	entries, _ := os.ReadDir(out)
+	if len(entries) != 1 {
+		t.Fatalf("left behind: %v", entries)
+	}
+	if b, _ := os.ReadFile(old); string(b) != "earlier" {
+		t.Fatalf("an existing file was changed: %q", b)
+	}
+
+	// the second conversion fails: the first render stays, the second file (which existed) stays as it
+	// was, and a third that was only reserved is removed
+	fake := fakecam.New()
+	triggers := 0
+	fake.Intercept = func(op uint16, params []uint32, data []byte, next func() (uint16, []byte)) (uint16, []byte) {
+		if op == 0x1016 && len(params) == 1 && params[0] == rawconv.PropTrigger {
+			if triggers++; triggers == 2 {
+				return fakecam.GeneralError, nil
+			}
+		}
+		return next()
+	}
+	r = runWith(t, cameraFactory(fake), "preview", raf, "--as-shot", "-r", "everyday", "street-mono", "-o", out, "--no-sheet")
+	if r.code == 0 {
+		t.Fatal("the failed conversion did not fail the command")
+	}
+	if !exists(filepath.Join(out, "DSCF0001__as-shot.jpg")) {
+		t.Fatal("the finished render was removed")
+	}
+	if b, _ := os.ReadFile(old); string(b) != "earlier" {
+		t.Fatalf("an existing file was changed or removed: %q", b)
+	}
+	if exists(filepath.Join(out, "DSCF0001__street-mono.jpg")) {
+		t.Fatal("an unused reserved file was left behind")
 	}
 }

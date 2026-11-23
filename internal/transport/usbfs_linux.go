@@ -83,8 +83,12 @@ func openUSBFS(sysRoot, devRoot string) (*usbfsTransport, error) {
 	}
 	t.framer = usbFramer{pipe: t, outMPS: t.intf.outMPS, inMPS: t.intf.inMPS}
 	// An earlier process that was interrupted mid-transaction may have left data or a response in the
-	// pipe; throw it away before the first request.
-	t.framer.drain(func(p []byte) (int, error) { return t.bulkTimeout(t.intf.epIn, p, drainTimeoutMS) })
+	// pipe; throw it away before the first request. If the pipe does not go quiet, give up before
+	// sending anything.
+	read := func(p []byte) (int, error) { return t.bulkTimeout(t.intf.epIn, p, drainTimeoutMS) }
+	if err := t.framer.clearStale(read, defaultDrainLimits, func() { _ = t.Close() }); err != nil {
+		return nil, err
+	}
 	return t, nil
 }
 
@@ -150,18 +154,31 @@ func (t *usbfsTransport) bulk(ep uint8, p []byte) (int, error) {
 	return t.bulkTimeout(ep, p, usbTimeoutMS)
 }
 
+// bulkTimeout runs one bulk transfer; timeoutMS must not be 0, which usbfs takes as "no timeout". A
+// transfer that times out returns an error wrapping errBulkTimeout (and the errno).
 func (t *usbfsTransport) bulkTimeout(ep uint8, p []byte, timeoutMS uint32) (int, error) {
-	xfer := usbdevfsBulkTransfer{ep: uint32(ep), len: uint32(len(p)), timeout: timeoutMS}
+	xfer := usbdevfsBulkTransfer{ep: uint32(ep), len: uint32(len(p)), timeout: max(timeoutMS, 1)}
 	if len(p) > 0 {
 		xfer.data = unsafe.Pointer(&p[0])
 	}
 	n, err := t.ioctl(usbdevfsBulk, unsafe.Pointer(&xfer))
 	runtime.KeepAlive(p)
-	return n, err
+	if err != nil {
+		if errors.Is(err, unix.ETIMEDOUT) {
+			err = fmt.Errorf("%w (%w)", errBulkTimeout, err)
+		}
+		return 0, err
+	}
+	return n, nil
 }
 
 func (t *usbfsTransport) BulkOut(p []byte) (int, error) { return t.bulk(t.intf.epOut, p) }
 func (t *usbfsTransport) BulkIn(p []byte) (int, error)  { return t.bulk(t.intf.epIn, p) }
+
+func (t *usbfsTransport) BulkInTimeout(p []byte, timeout time.Duration) (int, error) {
+	ms := min(max(timeout.Milliseconds(), 1), usbTimeoutMS)
+	return t.bulkTimeout(t.intf.epIn, p, uint32(ms))
+}
 
 func (t *usbfsTransport) Transact(op uint16, params []uint32, dataOut []byte) (uint16, []uint32, []byte, error) {
 	if t.closed {

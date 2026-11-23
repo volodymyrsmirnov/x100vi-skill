@@ -99,12 +99,14 @@ func Read(s *ptp.Session) ([]byte, error) {
 		return nil, errs.PTP(code, "ask for the camera's settings file",
 			"The camera offers its settings file only in USB RAW CONV./BACKUP RESTORE mode.")
 	}
-	r := ptp.NewReader(info)
-	r.U32()
-	format, _, size := r.U16(), r.U16(), r.U32()
-	if r.Err != nil {
-		return nil, errs.Wrap(errs.General, r.Err, "the camera sent an unreadable description of its settings file", "")
+	// The whole description must parse: the session counts the handle as described (and lets it be
+	// downloaded) only then, so a partial parse here would end in the download guard's refusal.
+	desc, perr := ptp.ParseObjectInfo(info)
+	if perr != nil {
+		return nil, errs.Wrap(errs.General, perr, "the camera sent an unreadable description of its settings file",
+			"Run the command again; if it keeps happening, switch the camera off and on.")
 	}
+	format, size := desc.Format, desc.Size
 	if format != ObjectFormat {
 		return nil, errs.New(errs.General,
 			fmt.Sprintf("the camera offered object format 0x%04X instead of its settings file", format), "")

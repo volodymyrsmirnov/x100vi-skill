@@ -351,3 +351,25 @@ func TestIgnoredByPriority(t *testing.T) {
 		t.Errorf("%v", got)
 	}
 }
+
+// A film given by its code is checked like the same film given by name: "unknown:0x000C" is Acros.
+func TestFilmChecksUseTheEncodedCode(t *testing.T) {
+	for _, film := range []string{"acros", "unknown:0x000C", "UNKNOWN:0x000c"} {
+		_, err := EncodeRecipe(recipe(t, `{"film_simulation": "`+film+`", "color": 2}`), false)
+		e, ok := errs.As(err)
+		if !ok || e.Kind != errs.InvalidRecipe || !strings.Contains(e.Message, "color does not apply") {
+			t.Errorf("%s with color 2: %v", film, err)
+		}
+		w := wire(t, `{"film_simulation": "`+film+`", "monochromatic": {"warm_cool": 3}}`, false)
+		if w["monochromatic.warm_cool"] != 30 || w["monochromatic.magenta_green"] != 0 {
+			t.Errorf("%s: tint %v", film, w)
+		}
+		if _, ok := w["color"]; ok {
+			t.Errorf("%s: color written", film)
+		}
+	}
+	// a colour film by code still refuses a tint
+	if _, err := EncodeRecipe(recipe(t, `{"film_simulation": "unknown:0x0001", "monochromatic": {"warm_cool": 3}}`), false); err == nil {
+		t.Error("tint accepted under provia given by code")
+	}
+}

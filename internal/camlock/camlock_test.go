@@ -230,6 +230,11 @@ func TestAPermissionErrorNamesThePathOrTheSandbox(t *testing.T) {
 	if !ok || e.Kind != errs.General || !strings.Contains(e.Message, path) {
 		t.Fatalf("got %v", err)
 	}
+	// No sandbox announced itself, but an agent's sandbox may still be the reason.
+	if want := "Check that this account may create and read " + path + ", then run the command again. " +
+		"If an AI agent ran this command, it may be sandboxed; run it outside the sandbox."; e.Hint != want {
+		t.Fatalf("hint %q", e.Hint)
+	}
 
 	t.Setenv("X100VI_SANDBOX", "Test agent")
 	_, err = Acquire()

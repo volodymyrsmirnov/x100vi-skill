@@ -612,10 +612,15 @@ type Write struct {
 	Wire  int
 }
 
+// filmCode is the film simulation's encoded wire value, so the mono / no-colour checks treat a code
+// spelled "unknown:0x000C" exactly like "acros". ok is false when there is no film or it does not encode.
 func filmCode(full map[string]any) (int, bool) {
-	name, _ := Get(full, "film_simulation").(string)
-	code, ok := FilmSimulation.Codes[strings.ToLower(name)]
-	return code, ok
+	v := Get(full, "film_simulation")
+	if v == nil {
+		return 0, false
+	}
+	code, err := EncodeField(ByKey["film_simulation"], v)
+	return code, err == nil
 }
 
 // EncodeRecipe validates a recipe and returns the ordered property writes for it.

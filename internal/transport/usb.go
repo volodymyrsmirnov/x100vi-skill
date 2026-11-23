@@ -12,8 +12,10 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 	"unsafe"
 
+	"github.com/volodymyrsmirnov/x100vi-skill/internal/errs"
 	"github.com/volodymyrsmirnov/x100vi-skill/internal/ptp"
 )
 
@@ -27,24 +29,45 @@ const (
 	maxStaleContainers = 4
 
 	// When the device is opened, what an earlier, interrupted process left in the bulk IN pipe is read
-	// and thrown away: reads with a short timeout until one times out, or until one of the bounds.
+	// and thrown away: reads with a short timeout until the pipe is empty (see drain).
 	drainTimeoutMS = 100
-	maxDrainReads  = 64
-	maxDrainBytes  = 64 << 20
+
+	// closeReplyTimeout bounds the wait for CloseSession's reply. The command's work is done by then, so
+	// a camera that does not answer the close must not hold the command up for a full transfer timeout.
+	closeReplyTimeout = 5 * time.Second
 )
 
-// errStaleContainers is a camera that keeps answering other transactions than the current one.
-var errStaleContainers = errors.New("the camera is answering an earlier request")
+// drainLimits bound the startup drain. An interrupted GetObject of a full-size TIFF leaves over 245 MB
+// behind; at USB 2.0 speeds that drains in well under ten seconds.
+type drainLimits struct {
+	bytes int64
+	time  time.Duration
+}
+
+var defaultDrainLimits = drainLimits{bytes: 1 << 30, time: 60 * time.Second}
+
+var (
+	// errStaleContainers is a camera that keeps answering other transactions than the current one.
+	errStaleContainers = errors.New("the camera is answering an earlier request")
+	// errBulkTimeout is a bulk transfer that ended because its timeout passed. bulkPipe implementations
+	// wrap it, so the framer can tell a quiet pipe from a broken one.
+	errBulkTimeout = errors.New("bulk transfer timed out")
+	// errDrainBudget is a drain that used up its byte or time budget before the pipe went quiet.
+	errDrainBudget = errors.New("the camera kept sending data")
+)
 
 // linuxHint is what to check on Linux when the camera cannot be reached.
 const linuxHint = "On Linux, unmount the camera in the file manager (gvfs) and make sure your user may " +
 	"access USB devices (a udev rule for vendor 04cb, or run with sudo)."
 
 // bulkPipe moves bytes over the PTP interface's bulk endpoints. Each call is one bulk transfer and
-// returns the number of bytes moved.
+// returns the number of bytes moved. BulkOut and BulkIn use the transport's normal timeout;
+// BulkInTimeout gives up after timeout instead. A transfer that times out returns an error wrapping
+// errBulkTimeout.
 type bulkPipe interface {
 	BulkOut(p []byte) (int, error)
 	BulkIn(p []byte) (int, error)
+	BulkInTimeout(p []byte, timeout time.Duration) (int, error)
 }
 
 // usbFramer runs PTP transactions over a bulkPipe. It numbers them: OpenSession is transaction 0, as
@@ -55,6 +78,21 @@ type usbFramer struct {
 	inMPS  int    // max packet size of the bulk IN endpoint
 	tid    uint32 // id of the last transaction
 	buf    []byte
+	clock  func() time.Time // nil: time.Now; tests replace it
+}
+
+func (f *usbFramer) now() time.Time {
+	if f.clock != nil {
+		return f.clock()
+	}
+	return time.Now()
+}
+
+func (f *usbFramer) packetSize() int {
+	if f.inMPS > 0 {
+		return f.inMPS
+	}
+	return 512
 }
 
 // nextTID is the transaction id of a new request. PTP sends OpenSession with id 0 and answers it with
@@ -70,23 +108,60 @@ func (f *usbFramer) nextTID(op uint16) uint32 {
 
 // drain reads and discards what is waiting in the bulk IN pipe, left by an earlier process that was
 // interrupted mid-transaction, so the first request does not take it for its answer. read is a bulk IN
-// transfer with a short timeout; draining stops at its first error (normally that timeout: the pipe is
-// empty) or after maxDrainReads reads or maxDrainBytes bytes. It returns the reads made and the bytes
-// thrown away.
-func (f *usbFramer) drain(read func(p []byte) (int, error)) (reads, discarded int) {
+// transfer with a short timeout.
+//
+// The pipe is empty when a read of one packet times out. Data is read in large transfers, but when one
+// of those times out it may have taken part of the data with it (usbfs does not say how much arrived
+// before the timeout), so a one-packet read confirms the pipe is quiet before drain believes it.
+//
+// It returns the bytes thrown away and nil once the pipe is empty; errDrainBudget when the byte or time
+// budget of lim ran out first; or the first error other than a timeout. Only nil means the next
+// request will read its own answer.
+func (f *usbFramer) drain(read func(p []byte) (int, error), lim drainLimits) (int64, error) {
 	size := max(f.inMPS, usbReadSize)
 	if len(f.buf) < size {
 		f.buf = make([]byte, size)
 	}
-	for reads < maxDrainReads && discarded < maxDrainBytes {
-		n, err := read(f.buf[:size])
-		reads++
-		if err != nil {
-			break
+	start := f.now()
+	var discarded int64
+	probe := true // the next read is one packet: normally the pipe is empty, and that is all it takes
+	for {
+		if discarded >= lim.bytes || f.now().Sub(start) >= lim.time {
+			return discarded, fmt.Errorf("%w: %d bytes discarded in %v, and more is coming",
+				errDrainBudget, discarded, f.now().Sub(start).Round(time.Millisecond))
 		}
-		discarded += n
+		want := size
+		if probe {
+			want = f.packetSize()
+		}
+		n, err := read(f.buf[:want])
+		if errors.Is(err, errBulkTimeout) {
+			if probe {
+				return discarded, nil
+			}
+			probe = true
+			continue
+		}
+		if err != nil {
+			return discarded, err
+		}
+		discarded += int64(n)
+		probe = false
 	}
-	return reads, discarded
+}
+
+// clearStale drains the bulk IN pipe before the first request. When the pipe cannot be emptied (the
+// budget ran out, or the transfer failed), no request may be sent: the answer to it would be lost among
+// the old data. clearStale then calls release, which frees the interface and closes the device, and
+// returns the error to report.
+func (f *usbFramer) clearStale(read func(p []byte) (int, error), lim drainLimits, release func()) error {
+	if _, err := f.drain(read, lim); err != nil {
+		release()
+		return errs.Wrap(errs.NotResponding, err,
+			"the camera is still sending data from an earlier, interrupted command",
+			"Switch the camera off and on, reconnect, then run the command again.")
+	}
+	return nil
 }
 
 func (f *usbFramer) write(p []byte) error {
@@ -131,10 +206,16 @@ func (f *usbFramer) transact(op uint16, params []uint32, dataOut []byte) (uint16
 			}
 		}
 	}
+	// CloseSession comes after the command's work: a camera that does not answer it gets
+	// closeReplyTimeout in all, not a full transfer timeout per read.
+	var deadline time.Time
+	if op == ptp.OpCloseSession {
+		deadline = f.now().Add(closeReplyTimeout)
+	}
 	var dataIn []byte
 	stale := 0
 	for {
-		h, body, err := f.readContainer()
+		h, body, err := f.readContainer(deadline)
 		if err != nil {
 			return 0, nil, nil, err
 		}
@@ -159,8 +240,8 @@ func (f *usbFramer) transact(op uint16, params []uint32, dataOut []byte) (uint16
 }
 
 // readContainer reads one container: transfers until a header has arrived, then until its announced
-// length has.
-func (f *usbFramer) readContainer() (header, []byte, error) {
+// length has. With a deadline (not zero), every transfer gives up when it passes.
+func (f *usbFramer) readContainer(deadline time.Time) (header, []byte, error) {
 	size := max(f.inMPS, usbReadSize)
 	if len(f.buf) < size {
 		f.buf = make([]byte, size)
@@ -168,7 +249,15 @@ func (f *usbFramer) readContainer() (header, []byte, error) {
 	var acc []byte
 	empty := 0
 	read := func() error {
-		n, err := f.pipe.BulkIn(f.buf[:size])
+		var n int
+		var err error
+		if deadline.IsZero() {
+			n, err = f.pipe.BulkIn(f.buf[:size])
+		} else if left := deadline.Sub(f.now()); left > 0 {
+			n, err = f.pipe.BulkInTimeout(f.buf[:size], left)
+		} else {
+			err = fmt.Errorf("%w: no complete reply in time", errBulkTimeout)
+		}
 		if err != nil {
 			return err
 		}

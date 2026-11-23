@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -496,7 +497,7 @@ func TestABodyThatIgnoresTheFileTypeIsReported(t *testing.T) {
 	if e := wantKind(t, err, errs.ConversionFailed); !strings.Contains(e.Message, "other than TIFF") {
 		t.Fatal(e.Message)
 	}
-	if len(fake.Objects) != 0 {
+	if len(fake.Objects) != 1 { // not what was asked for, so possibly not ours: left on the camera
 		t.Fatal(fake.Objects)
 	}
 }
@@ -721,7 +722,7 @@ func TestATriggerThatTimesOutIsNeverFollowedByAnother(t *testing.T) {
 	if _, err := conv.Develop(shot, false, 0, ""); !errs.Is(err, errs.NotResponding) {
 		t.Fatal(err)
 	}
-	if !cam.ConversionMayBeRunning {
+	if !cam.ConversionMayBeRunning() {
 		t.Fatal("the camera session does not know a conversion may be running")
 	}
 	fake.StallConversion = false
@@ -749,7 +750,7 @@ func TestARefusedTriggerDoesNotBlockTheNextConversion(t *testing.T) {
 	if _, err := conv.Develop(shot, false, 0, ""); !errs.Is(err, errs.CameraRefused) {
 		t.Fatal(err)
 	}
-	if cam.ConversionMayBeRunning {
+	if cam.ConversionMayBeRunning() {
 		t.Fatal("a refused trigger marked a conversion as running")
 	}
 	develop(t, NewRawConverter(cam), shot, false, "")
@@ -766,5 +767,121 @@ func TestAfterATimeoutAFreshConverterNeverTriggersAgain(t *testing.T) {
 	fake.StallConversion = false
 	if _, err := NewRawConverter(conv.Camera).Develop(shot, false, 0, ""); err == nil || triggers(fake) != 1 {
 		t.Fatal("a fresh converter triggered again", err)
+	}
+}
+
+// The camera's profile has 29 cells (625 bytes); 621 or 623 bytes (28 whole cells) is not a profile to
+// patch, whether it comes back as the as-shot profile at upload or as the read-back after a write.
+func TestAProfileShorterThan29CellsIsRefused(t *testing.T) {
+	for _, n := range []int{621, 623} {
+		if err := NewProfile(fakecam.AsShotProfile[:n]).Validate(); !errs.Is(err, errs.ConversionFailed) {
+			t.Fatalf("%d bytes: %v", n, err)
+		}
+	}
+	if err := NewProfile(fakecam.AsShotProfile[:625]).Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []int{621, 623} {
+		t.Run(fmt.Sprintf("as shot %d", n), func(t *testing.T) {
+			conv, fake, raf := setup(t)
+			fake.Intercept = func(op uint16, params []uint32, data []byte, next func() (uint16, []byte)) (uint16, []byte) {
+				code, d := next()
+				if op == ptp.OpGetDevicePropValue && params[0] == camera.ProfileProp && len(d) > n {
+					d = d[:n]
+				}
+				return code, d
+			}
+			_, err := conv.Upload(raf)
+			if e := wantKind(t, err, errs.ConversionFailed); !strings.Contains(e.Message, fmt.Sprintf("(%d bytes)", n)) {
+				t.Fatal(e.Message)
+			}
+		})
+		t.Run(fmt.Sprintf("read back %d", n), func(t *testing.T) {
+			conv, fake, raf := setup(t)
+			shot := upload(t, conv, raf)
+			conv.AsShot = nil // only the profile's own minimum applies
+			fake.Intercept = func(op uint16, params []uint32, data []byte, next func() (uint16, []byte)) (uint16, []byte) {
+				code, d := next()
+				if op == ptp.OpGetDevicePropValue && params[0] == camera.ProfileProp && len(d) > n {
+					d = d[:n]
+				}
+				return code, d
+			}
+			_, err := conv.Develop(shot, false, 0, "")
+			if e := wantKind(t, err, errs.ConversionFailed); !strings.Contains(e.Message, "unreadable conversion settings") {
+				t.Fatal(e.Message)
+			}
+			if n := triggers(fake); n != 0 {
+				t.Fatal("triggered:", n)
+			}
+		})
+	}
+}
+
+// The "conversion may be running" flag belongs to the PTP session: a second camera.Camera on the same
+// session refuses to trigger too.
+func TestTwoCamerasSharingASessionShareTheConversionFlag(t *testing.T) {
+	fake := fakecam.New()
+	fake.StallConversion = true
+	cam, err := camera.Open(&timingOut{FakeX100VI: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cam.Close() })
+	other := &camera.Camera{Session: cam.Session, Info: cam.Info}
+	conv := NewRawConverter(cam)
+	shot := upload(t, conv, fakecam.RAFBytes("", 0))
+	if _, err := conv.Develop(shot, false, 0, ""); !errs.Is(err, errs.NotResponding) {
+		t.Fatal(err)
+	}
+	if !cam.Session.ConversionMayBeRunning || !other.ConversionMayBeRunning() {
+		t.Fatal("the flag is not on the shared session")
+	}
+	fake.StallConversion = false
+	again := NewRawConverter(other)
+	shot = upload(t, again, fakecam.RAFBytes("", 0))
+	_, err = again.Develop(shot, false, 0, "")
+	if e := wantKind(t, err, errs.ConversionFailed); !strings.Contains(e.Message, "never finished") {
+		t.Fatal(e.Message)
+	}
+	if n := triggers(fake); n != 1 {
+		t.Fatal("triggers:", n)
+	}
+}
+
+// The new object is deleted only after a complete download in the requested format; when the download
+// fails or comes back short, it is left on the camera and the conversion fails.
+func TestAResultThatFailsToDownloadIsNotDeleted(t *testing.T) {
+	for name, answer := range map[string]func(d []byte) (uint16, []byte){
+		"refused": func([]byte) (uint16, []byte) { return 0x2002, nil },
+		"short":   func(d []byte) (uint16, []byte) { return 0x2001, d[:len(d)-1] },
+	} {
+		t.Run(name, func(t *testing.T) {
+			conv, fake, raf := setup(t)
+			shot := upload(t, conv, raf)
+			deletes := 0
+			fake.Intercept = func(op uint16, params []uint32, data []byte, next func() (uint16, []byte)) (uint16, []byte) {
+				code, d := next()
+				switch op {
+				case ptp.OpGetObject:
+					return answer(d)
+				case ptp.OpDeleteObject:
+					deletes++
+				}
+				return code, d
+			}
+			if _, err := conv.Develop(shot, false, 0, ""); err == nil {
+				t.Fatal("no error")
+			}
+			if deletes != 0 || len(fake.Objects) != 1 {
+				t.Fatal("deleted:", deletes, fake.Objects)
+			}
+		})
+	}
+	// and a good result is deleted after it was downloaded
+	conv, fake, raf := setup(t)
+	develop(t, conv, upload(t, conv, raf), false, "")
+	if len(fake.Objects) != 0 {
+		t.Fatal(fake.Objects)
 	}
 }

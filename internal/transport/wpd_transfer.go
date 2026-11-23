@@ -75,10 +75,16 @@ func wpdRead(c wpdTransfers, what string, op uint16, params []uint32) (uint16, [
 		if err != nil {
 			return 0, nil, wpdAbort(c, what, ctx, err)
 		}
-		// The buffer may keep the requested size; NUM_BYTES_READ says how much of it is data.
+		// The buffer may keep the requested size; NUM_BYTES_READ says how much of it is data. A count past
+		// the buffer, or past what was asked for, is not believed: the data would not line up with the
+		// total, or would take bytes that are not data.
 		if uint64(n) > uint64(len(buf)) {
 			return 0, nil, wpdAbort(c, what, ctx, errs.NotRespondingErr(fmt.Sprintf(
 				"Windows reported %d bytes read during %s but returned %d", n, what, len(buf))))
+		}
+		if n > want {
+			return 0, nil, wpdAbort(c, what, ctx, errs.NotRespondingErr(fmt.Sprintf(
+				"Windows reported %d bytes read during %s, more than the %d asked for", n, what, want)))
 		}
 		buf = buf[:n]
 		data = append(data, buf...)

@@ -65,13 +65,15 @@ typedef struct {
 // mark: it must not be taken for the answer to a later close. The next open of a close-pending device
 // waits for that callback (or the device's removal) first. Each callback is consumed once: by the
 // pending mark of its device, else by the close currently waiting for that device, else by nothing.
+// Removal is tracked per device too: only the removal of the device a close is for ends that close, or
+// clears its pending mark, and only a removed device fails its requests as disconnected.
 @interface X100VIGoICCDelegate : NSObject <ICDeviceBrowserDelegate, ICCameraDeviceDelegate>
 @property (atomic, strong) NSMutableArray *devices;
 @property (atomic) BOOL opened;
 @property (atomic, strong) NSError *openError;
-@property (atomic) BOOL removed;
 @property (atomic, strong) X100VIGoICCClose *closing;
 @property (atomic, strong) NSHashTable *closePending;
+@property (atomic, strong) NSHashTable *removedDevices;
 @end
 
 @implementation X100VIGoICCDelegate
@@ -81,6 +83,9 @@ typedef struct {
 		_devices = [NSMutableArray array];
 		_closePending = [NSHashTable hashTableWithOptions:
 			NSPointerFunctionsStrongMemory | NSPointerFunctionsObjectPointerPersonality];
+		// Weak: a removed device object is not kept alive by its mark, and the mark goes with it.
+		_removedDevices = [NSHashTable hashTableWithOptions:
+			NSPointerFunctionsWeakMemory | NSPointerFunctionsObjectPointerPersonality];
 	}
 	return self;
 }
@@ -90,6 +95,20 @@ typedef struct {
 - (BOOL)isClosePending:(ICDevice *)device {
 	@synchronized (self) { return [self.closePending containsObject:device]; }
 }
+- (BOOL)isRemoved:(ICDevice *)device {
+	@synchronized (self) { return [self.removedDevices containsObject:device]; }
+}
+// markRemoved records that device is gone: its pending close is over, and so is a close waiting for it.
+- (void)markRemoved:(ICDevice *)device {
+	@synchronized (self) {
+		[self.removedDevices addObject:device];
+		[self.closePending removeObject:device];
+	}
+}
+// clearRemoved forgets a removal mark before device is opened again.
+- (void)clearRemoved:(ICDevice *)device {
+	@synchronized (self) { [self.removedDevices removeObject:device]; }
+}
 // beginClose makes a waiter for device's close callback the current one.
 - (X100VIGoICCClose *)beginClose:(ICDevice *)device {
 	X100VIGoICCClose *closing = [[X100VIGoICCClose alloc] init];
@@ -98,22 +117,24 @@ typedef struct {
 	return closing;
 }
 // endClose stops waiting. A close that got no callback, of a device that was not removed, leaves the
-// device close-pending. It returns whether the close is over (confirmed, or the device is gone).
+// device close-pending. It returns whether the close is over (confirmed, or that device is gone).
 - (BOOL)endClose:(X100VIGoICCClose *)closing {
 	@synchronized (self) {
 		if (self.closing == closing) {
 			self.closing = nil;
 		}
-		if (closing.done || self.removed) {
+		if (closing.done || [self.removedDevices containsObject:closing.device]) {
 			return YES;
 		}
 		[self.closePending addObject:closing.device];
 		return NO;
 	}
 }
+// forgetDevice is the browser's removal: the device is no longer listed, and is marked removed.
 - (void)forgetDevice:(ICDevice *)device {
 	@synchronized (self) {
 		[self.devices removeObjectIdenticalTo:device];
+		[self.removedDevices addObject:device];
 		[self.closePending removeObject:device];
 	}
 }
@@ -146,8 +167,7 @@ typedef struct {
 	x_wake();
 }
 - (void)didRemoveDevice:(ICDevice *)device {
-	self.removed = YES;
-	@synchronized (self) { [self.closePending removeObject:device]; }
+	[self markRemoved:device];
 	x_wake();
 }
 // ICCameraDeviceDelegate (required methods; the content catalog is not used)
@@ -254,7 +274,6 @@ static int x_icc_open(double findTimeout, double pendingTimeout, double openTime
 		}
 		gDelegate.opened = NO;
 		gDelegate.openError = nil;
-		gDelegate.removed = NO;
 		x_spin(^BOOL { return x_find() != nil; }, findTimeout);
 		ICCameraDevice *camera = x_find();
 		if (camera == nil) {
@@ -277,8 +296,8 @@ static int x_icc_open(double findTimeout, double pendingTimeout, double openTime
 					return XI_NOT_FOUND;
 				}
 			}
-			gDelegate.removed = NO;
 		}
+		[gDelegate clearRemoved:camera];
 		camera.delegate = gDelegate;
 		[camera requestOpenSession];
 		if (!x_spin(^BOOL { return gDelegate.opened; }, openTimeout)) {
@@ -315,10 +334,10 @@ static int x_icc_send(uintptr_t handle, const void *command, size_t commandLen, 
 		if (!pthread_main_np()) {
 			return XI_NOT_MAIN_THREAD;
 		}
-		if (gDelegate.removed) {
+		ICCameraDevice *camera = (__bridge ICCameraDevice *)(void *)handle;
+		if ([gDelegate isRemoved:camera]) {
 			return XI_REMOVED;
 		}
-		ICCameraDevice *camera = (__bridge ICCameraDevice *)(void *)handle;
 		X100VIGoICCReply *box = [[X100VIGoICCReply alloc] init];
 		NSData *cmd = [NSData dataWithBytes:command length:commandLen];
 		NSData *out = outLen ? [NSData dataWithBytes:outData length:outLen] : [NSData data];
@@ -354,7 +373,7 @@ static int x_icc_close(uintptr_t handle, double timeout, char **message) {
 		}
 		X100VIGoICCClose *closing = [gDelegate beginClose:camera];
 		[camera requestCloseSession];
-		x_spin(^BOOL { return closing.done || gDelegate.removed; }, timeout);
+		x_spin(^BOOL { return closing.done || [gDelegate isRemoved:camera]; }, timeout);
 		BOOL done = [gDelegate endClose:closing]; // on a timeout, marks the device close-pending
 		if (closing.error != nil) {
 			*message = x_strdup(closing.error.localizedDescription);
@@ -411,14 +430,35 @@ static int x_close_check(void) {
 		if (again.error != nil || [d isClosePending:a]) return 8;
 		if (![d endClose:again] || [d isClosePending:a]) return 9;
 
-		// The device's removal clears the mark, and a close that ended with the device removed is over.
+		// Removal is per device: another device's removal neither ends a waiting close nor clears a
+		// pending mark, and only the removed device counts as disconnected.
+		ICDevice *e = (ICDevice *)(id)[[NSObject alloc] init];
+		@synchronized (d) { [d.devices addObject:e]; }
+		c = [d beginClose:a];
+		[d didRemoveDevice:e];
+		if (c.done || [d isRemoved:a] || ![d isRemoved:e]) return 10;
+		if ([d endClose:c] || ![d isClosePending:a]) return 11; // e's removal did not end a's close
+		[d didRemoveDevice:e];
+		if (![d isClosePending:a]) return 12; // nor clear a's pending mark
+		c = [d beginClose:e];
+		if (![d endClose:c] || [d isClosePending:e]) return 13; // a close of the removed device is over
+
+		// The device's own removal clears its mark, and a close that ends with it removed is over.
+		[d didRemoveDevice:a];
+		if ([d isClosePending:a] || ![d isRemoved:a]) return 14;
+		c = [d beginClose:a];
+		if (![d endClose:c] || [d isClosePending:a]) return 15;
+		[d clearRemoved:a]; // what an open of the device does
+		if ([d isRemoved:a]) return 16;
+
+		// The browser's removal does the same for its device, and only for it.
 		c = [d beginClose:b];
 		[d endClose:c];
-		[d forgetDevice:b]; // what the browser's didRemoveDevice: does
-		if ([d isClosePending:b] || [d hasDevice:b]) return 10;
-		d.removed = YES;
+		if (![d isClosePending:b]) return 17;
 		c = [d beginClose:a];
-		if (![d endClose:c] || [d isClosePending:a]) return 11;
+		[d forgetDevice:b]; // what the browser's didRemoveDevice: does
+		if ([d isClosePending:b] || [d hasDevice:b] || ![d isRemoved:b] || [d isRemoved:a]) return 18;
+		if ([d endClose:c] || ![d isClosePending:a]) return 19;
 		return 0;
 	}
 }

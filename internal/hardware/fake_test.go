@@ -5,6 +5,7 @@ package hardware
 import (
 	"fmt"
 	"maps"
+	"strings"
 	"testing"
 
 	"github.com/volodymyrsmirnov/x100vi-skill/internal/camera"
@@ -140,5 +141,67 @@ func TestAFailedWBSnapshotChangesNothingRemembered(t *testing.T) {
 	}
 	if fake.Slots[slot]["white_balance.kelvin"] != 6500 {
 		t.Errorf("Kelvin %d", fake.Slots[slot]["white_balance.kelvin"])
+	}
+}
+
+// A body that acknowledges a WB-mode selection without making it would have the walk read another
+// mode's shift: every selection is read back, and a mismatch fails the walk (which puts back what it
+// changed: nothing further to report here).
+func TestTheWBWalkReadsEverySelectionBack(t *testing.T) {
+	slot := 6
+	cam, fake := fakeRegister(t, slot)
+	before := maps.Clone(fake.Slots[slot])
+	shade := model.WhiteBalance.Codes["shade"]
+	fake.FieldHook = func(state map[string]int, f model.Field, target fakecam.Target, wire int, next func() uint16) uint16 {
+		if f.Key == "white_balance.mode" && !target.Live && wire == shade {
+			return fakecam.OK // acknowledged, not applied
+		}
+		return next()
+	}
+	rec := &recorder{}
+	if _, ok := wbMemory(rec, cam, slot); ok {
+		t.Fatal("the walk accepted a selection the register did not make")
+	}
+	if len(rec.errors) != 1 || !strings.Contains(rec.errors[0], "selected WB shade (0x8006), but the register reads back 0x") {
+		t.Fatalf("%q", rec.errors)
+	}
+	if !maps.Equal(fake.Slots[slot], before) {
+		t.Fatalf("register not put back:\n%v\n%v", before, fake.Slots[slot])
+	}
+}
+
+// When the walk's own changes cannot be put back, the failure names exactly what the register holds
+// instead of claiming everything was put back.
+func TestAFailedRollbackSaysWhatWasNotPutBack(t *testing.T) {
+	slot := 6
+	cam, fake := fakeRegister(t, slot)
+	modeWrites := 0
+	fake.FieldHook = func(state map[string]int, f model.Field, target fakecam.Target, wire int, next func() uint16) uint16 {
+		if target.Live {
+			return next()
+		}
+		switch {
+		case f.Key == "white_balance.mode":
+			if modeWrites++; modeWrites > 1 { // the first selection (auto) works, then the mode is stuck
+				return fakecam.OK
+			}
+		case f.Key == "d_range_priority" && wire != 0:
+			return fakecam.OK // priority can be turned off but not back on
+		}
+		return next()
+	}
+	rec := &recorder{}
+	roundTripAndRestore(rec, cam, slot)
+	all := strings.Join(rec.errors, "\n")
+	want := "after the failed WB snapshot walk, C6 could not be put back: " +
+		"active WB mode (wanted 0x0004, register holds 0x0002); D-range priority (wanted 0x0001, register holds 0x0000)"
+	if !strings.Contains(all, want) || !strings.Contains(all, "selected WB daylight (0x0004), but the register reads back 0x0002") {
+		t.Fatalf("errors:\n%s", all)
+	}
+	if strings.Contains(all, "were put back") {
+		t.Fatalf("claims the changes were put back:\n%s", all)
+	}
+	if fake.Slots[slot]["white_balance.mode"] != model.WhiteBalance.Codes["auto"] || fake.Slots[slot]["d_range_priority"] != 0 {
+		t.Fatal("the fake did not behave as set up", fake.Slots[slot])
 	}
 }

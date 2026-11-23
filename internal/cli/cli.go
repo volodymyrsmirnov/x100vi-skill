@@ -7,8 +7,10 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -472,7 +474,8 @@ func (e *env) restoreSettingsFile(a *Args, file string, blob []byte) error {
 
 func (e *env) restore(a *Args) error {
 	file := a.Pos("file")
-	if raw, err := os.ReadFile(file); err == nil && bytes.HasPrefix(raw, []byte(settingsfile.Magic)) {
+	raw, readErr := os.ReadFile(file)
+	if readErr == nil && bytes.HasPrefix(raw, []byte(settingsfile.Magic)) {
 		return e.restoreSettingsFile(a, file, raw)
 	}
 	data, err := library.LoadRecipe(file)
@@ -482,6 +485,11 @@ func (e *env) restore(a *Args) error {
 	slots, ok := data["slots"].(map[string]any)
 	if !ok {
 		return errs.Recipe(file+" is not a backup made by `x100vi backup`", "To write a single recipe use `x100vi set C1 recipe.json`.")
+	}
+	if readErr == nil {
+		if err := repeatedSlotKey(file, raw); err != nil { // decoding kept only one of them
+			return err
+		}
 	}
 	type job struct {
 		slot   *int
@@ -567,6 +575,63 @@ func (e *env) restore(a *Args) error {
 		[]string{"restored " + strings.Join(labels, ", "), "previous contents saved to " + previous})
 }
 
+// repeatedSlotKey refuses a backup whose top-level "slots" object names a custom setting twice. Keys are
+// compared as targets ("C1", "c1" and "1" are one), and the same key written twice counts too: decoding
+// the JSON into a map silently keeps only the last of those. Anything that is not well-formed is left to
+// the checks that follow.
+func repeatedSlotKey(file string, raw []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return nil
+	}
+	sawSlots := false
+	for dec.More() {
+		key, err := dec.Token()
+		if err != nil {
+			return nil
+		}
+		if key != "slots" {
+			var skip json.RawMessage
+			if dec.Decode(&skip) != nil {
+				return nil
+			}
+			continue
+		}
+		if sawSlots {
+			return errs.Recipe(fmt.Sprintf("%s has \"slots\" twice", file), "Keep one \"slots\" object with one entry per custom setting.")
+		}
+		sawSlots = true
+		if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+			return nil
+		}
+		seen := map[int]string{}
+		for dec.More() {
+			tok, err := dec.Token()
+			if err != nil {
+				return nil
+			}
+			k, _ := tok.(string)
+			var skip json.RawMessage
+			if dec.Decode(&skip) != nil {
+				return nil
+			}
+			slot, err := model.ParseTarget(k)
+			if err != nil || slot == nil {
+				continue // reported with its own message by restore
+			}
+			if other, dup := seen[*slot]; dup {
+				return errs.Recipe(fmt.Sprintf("%s lists %s twice (as %s and %s)", file, model.TargetLabel(slot),
+					model.Quote(other), model.Quote(k)), "Keep one entry per custom setting.")
+			}
+			seen[*slot] = k
+		}
+		if _, err := dec.Token(); err != nil { // the closing brace of "slots"
+			return nil
+		}
+	}
+	return nil
+}
+
 func (e *env) validate(a *Args) error {
 	var results []any
 	var lines []string
@@ -611,7 +676,7 @@ func (e *env) validate(a *Args) error {
 	return nil
 }
 
-func (e *env) preview(a *Args) error {
+func (e *env) preview(a *Args) (retErr error) {
 	fmtName := a.Str("format")
 	format := rawconv.OutputFormats[fmtName]
 	full := a.Bool("full")
@@ -663,15 +728,6 @@ func (e *env) preview(a *Args) error {
 		jobs[i].label = unique(jobs[i].label, labelsTaken)
 	}
 	outDir := a.Str("out")
-	stemsTaken, pathsTaken := map[string]bool{}, map[string]bool{}
-	paths := make([][]string, len(rafs))
-	for i, raf := range rafs {
-		stem := unique(strings.TrimSuffix(filepath.Base(raf.Path), filepath.Ext(raf.Path)), stemsTaken)
-		for _, job := range jobs {
-			name := unique(stem+"__"+job.label, pathsTaken)
-			paths[i] = append(paths[i], filepath.Join(outDir, name+"."+format.Extension))
-		}
-	}
 	ev := a.Float("ev")
 	if _, err := rawconv.CheckExposure(ev); err != nil { // fail before connecting
 		return err
@@ -683,6 +739,46 @@ func (e *env) preview(a *Args) error {
 	}
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return err
+	}
+	// Each output file is also created now, in order, so the file system itself says when two names
+	// are one file: macOS treats the composed and decomposed spellings of "café" as the same name,
+	// which no string comparison here catches. A path that turns out to be an earlier one's file gets
+	// the next suffix. Files this command created and never wrote are removed again if it fails.
+	stemsTaken, pathsTaken := map[string]bool{}, map[string]bool{}
+	paths := make([][]string, len(rafs))
+	var outputs []*reservedFile
+	written := map[string]bool{}
+	defer func() {
+		if retErr == nil {
+			return
+		}
+		for _, r := range outputs {
+			if r.created && !written[r.path] {
+				_ = os.Remove(r.path)
+			}
+		}
+	}()
+	for i, raf := range rafs {
+		stem := unique(strings.TrimSuffix(filepath.Base(raf.Path), filepath.Ext(raf.Path)), stemsTaken)
+		for _, job := range jobs {
+			base := stem + "__" + job.label
+			for attempt := 0; ; attempt++ {
+				path := filepath.Join(outDir, unique(base, pathsTaken)+"."+format.Extension)
+				r, clash, err := reserveOutput(path, outputs)
+				if err != nil {
+					return err
+				}
+				if !clash {
+					outputs = append(outputs, r)
+					paths[i] = append(paths[i], path)
+					break
+				}
+				if attempt > len(outputs) { // every earlier file was hit: the file system is not making sense
+					return errs.New(errs.General, "cannot find a free name for "+path,
+						"Use an empty folder for --out and run the command again.")
+				}
+			}
+		}
 	}
 	timeout := time.Duration(a.Float("timeout") * float64(time.Second))
 	var renders, frames []any
@@ -729,6 +825,7 @@ func (e *env) preview(a *Args) error {
 				if err := os.WriteFile(target, image, 0o644); err != nil {
 					return err
 				}
+				written[target] = true
 				notApplied := make([]any, len(adjustments))
 				for i, adj := range adjustments {
 					notApplied[i] = adj.AsMap()
@@ -808,6 +905,54 @@ func (e *env) preview(a *Args) error {
 	return e.out.Emit(omap.New().Set("renders", renders).Set("frames", frames).Set("contact_sheet", sheetPath).
 		Set("format", format.Name).Set("exposure_ev", ev).Set("d_range_priority", drpOut).
 		Set("full_resolution", full).Set("warnings", strList(warnings)), lines)
+}
+
+// statOutput is os.Stat; tests replace it to stand in for a file system that folds Unicode spellings.
+var statOutput = os.Stat
+
+// reservedFile is a preview output created before connecting.
+type reservedFile struct {
+	path    string
+	created bool // this command created it (it did not exist), so it is removed again if left unused
+}
+
+// reserveOutput creates path, keeping an existing file's contents (the render overwrites it later), and
+// reports clash when the file system resolves path to the file of an earlier reservation. A file
+// created only to find that out is removed again.
+func reserveOutput(path string, earlier []*reservedFile) (r *reservedFile, clash bool, err error) {
+	created := true
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if errors.Is(err, fs.ErrExist) {
+		created = false
+		f, err = os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0o644)
+	}
+	if err != nil {
+		return nil, false, errs.Wrap(errs.General, err, "cannot create "+path+": "+err.Error(),
+			"Check that the output folder (--out) can be written to, then run the command again.")
+	}
+	f.Close()
+	undo := func() {
+		if created {
+			_ = os.Remove(path)
+		}
+	}
+	mine, err := statOutput(path)
+	if err != nil {
+		undo()
+		return nil, false, err
+	}
+	for _, e := range earlier {
+		theirs, err := statOutput(e.path)
+		if err != nil {
+			undo()
+			return nil, false, err
+		}
+		if os.SameFile(mine, theirs) {
+			undo()
+			return nil, true, nil
+		}
+	}
+	return &reservedFile{path: path, created: created}, false, nil
 }
 
 // unique returns name, or name-2, name-3, ... if that is already taken (ignoring case), and takes it.
@@ -1106,6 +1251,11 @@ func Main(argv []string, factory Factory, stdout, stderr io.Writer) int {
 		}
 	}
 	if cmd == nil {
+		// A caller that asked for JSON anywhere on the line gets this error as JSON too
+		// (`x100vi gte --json` like `x100vi --json gte`). The tokens are only scanned, not reordered.
+		if asksForJSON(rest[1:]) {
+			asJSON, out.JSON = true, true
+		}
 		return fail(errs.Recipe(fmt.Sprintf("unknown command %s.%s", model.Quote(rest[0]), model.Suggest(rest[0], names(cmds))),
 			"Run `x100vi --help` for the list."))
 	}

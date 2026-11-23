@@ -568,3 +568,126 @@ func TestASeededHiddenMonoTintDoesNotFailAColourRecipe(t *testing.T) {
 		t.Fatal("a hidden tint was read as part of the recipe")
 	}
 }
+
+// A partial recipe that switches the register to Kelvin without giving the shift keeps the shift the
+// Kelvin mode remembers: selecting Kelvin recalls it, the Kelvin change then zeroes it (a camera quirk),
+// and the write puts it back and verifies it.
+func TestAPartialSwitchToKelvinKeepsThatModesRememberedShift(t *testing.T) {
+	cam, fake := setup(t)
+	mustWrite(t, cam, recipe(t, `{"name": "K", "white_balance": {"mode": "kelvin", "kelvin": 6500, "shift_r": 4, "shift_b": -3}}`), slot(2), false)
+	mustWrite(t, cam, recipe(t, `{"name": "K", "white_balance": {"mode": "daylight", "shift_r": 1, "shift_b": 2}}`), slot(2), false)
+	if fake.SlotValue(2, "white_balance.mode") != "daylight" || fake.SlotValue(2, "white_balance.kelvin") != 6500 {
+		t.Fatal(fake.Slots[2])
+	}
+	mustWrite(t, cam, recipe(t, `{"white_balance": {"mode": "kelvin", "kelvin": 5000}}`), slot(2), true)
+	got := mustRead(t, cam, slot(2))["white_balance"]
+	want := map[string]any{"mode": "kelvin", "kelvin": 5000.0, "shift_r": 4.0, "shift_b": -3.0}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	// daylight's own shift is still remembered for daylight
+	mustWrite(t, cam, recipe(t, `{"white_balance": {"mode": "daylight"}}`), slot(2), true)
+	if wb := mustRead(t, cam, slot(2))["white_balance"].(map[string]any); wb["shift_r"] != 1.0 || wb["shift_b"] != 2.0 {
+		t.Fatal(wb)
+	}
+}
+
+// The recalled shift counts as intended, so a camera that will not keep it fails the write.
+func TestARecalledShiftTheCameraDropsIsReported(t *testing.T) {
+	cam, fake := setup(t)
+	mustWrite(t, cam, recipe(t, `{"name": "K", "white_balance": {"mode": "kelvin", "kelvin": 6500, "shift_r": 4, "shift_b": -3}}`), slot(2), false)
+	mustWrite(t, cam, recipe(t, `{"name": "K", "white_balance": {"mode": "daylight"}}`), slot(2), false)
+	fake.FieldHook = func(state map[string]int, f model.Field, target fakecam.Target, wire int, next func() uint16) uint16 {
+		if f.Key == "white_balance.shift_r" && wire != 0 {
+			return fakecam.OK // acknowledged, not kept
+		}
+		return next()
+	}
+	_, err := cam.Write(recipe(t, `{"white_balance": {"mode": "kelvin", "kelvin": 5000}}`), slot(2), true)
+	e := wantKind(t, err, errs.InvalidRecipe)
+	if !strings.Contains(e.Message, "0xD19A wanted 0x0004, camera holds 0x0000") {
+		t.Fatal(e.Message)
+	}
+}
+
+// A full recipe still defaults the shift to 0 when it switches to Kelvin.
+func TestAFullSwitchToKelvinDefaultsTheShift(t *testing.T) {
+	cam, _ := setup(t)
+	mustWrite(t, cam, recipe(t, `{"name": "K", "white_balance": {"mode": "kelvin", "kelvin": 6500, "shift_r": 4, "shift_b": -3}}`), slot(2), false)
+	mustWrite(t, cam, recipe(t, `{"name": "K", "white_balance": {"mode": "daylight"}}`), slot(2), false)
+	mustWrite(t, cam, recipe(t, `{"name": "K", "white_balance": {"mode": "kelvin", "kelvin": 5000}}`), slot(2), false)
+	got := mustRead(t, cam, slot(2))["white_balance"]
+	if want := map[string]any{"mode": "kelvin", "kelvin": 5000.0, "shift_r": 0.0, "shift_b": 0.0}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v", got)
+	}
+}
+
+// tintUnderAcros switches a register to Acros and reads its stored tint (writing nothing else).
+func tintUnderAcros(t *testing.T, cam *Camera, n int) (int, int) {
+	t.Helper()
+	if err := cam.Session.SetU16(model.SlotSelect, n); err != nil {
+		t.Fatal(err)
+	}
+	if err := cam.Session.SetU16(model.ByKey["film_simulation"].Slot, model.FilmSimulation.Codes["acros"]); err != nil {
+		t.Fatal(err)
+	}
+	wc, err := cam.Session.GetU16(model.ByKey["monochromatic.warm_cool"].Slot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mg, err := cam.Session.GetU16(model.ByKey["monochromatic.magenta_green"].Slot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wc, mg
+}
+
+// Naming a never-named register copies the live settings into it, including a tint that a colour film
+// then hides. The write puts the register's own tint (0) back, so the register does not carry a hidden
+// +3 that would surface the next time it is switched to a B&W film.
+func TestASeededHiddenTintIsPutBack(t *testing.T) {
+	for _, c := range []struct {
+		name, recipe string
+		partial      bool
+		film         string
+	}{
+		{"full colour recipe", `{"name": "COLOUR", "film_simulation": "classic_chrome"}`, false, "classic_chrome"},
+		{"partial recipe without a film", `{"name": "TONE", "highlight": 1}`, true, "provia"},
+		{"partial colour recipe", `{"name": "VELVIA", "film_simulation": "velvia", "color": 2}`, true, "velvia"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			cam, fake := setup(t)
+			fake.Live["film_simulation"] = model.FilmSimulation.Codes["acros"]
+			fake.Live["monochromatic.warm_cool"] = 30 // +3
+			mustWrite(t, cam, recipe(t, c.recipe), slot(5), c.partial)
+			if !fake.NamedBefore[5] {
+				t.Fatal("the register was not named, so the quirk was not exercised")
+			}
+			got := mustRead(t, cam, slot(5))
+			if got["film_simulation"] != c.film {
+				t.Fatalf("film %v, want %v (the register's own film)", got["film_simulation"], c.film)
+			}
+			if wc, mg := tintUnderAcros(t, cam, 5); wc != 0 || mg != 0 {
+				t.Fatalf("tint under Acros is %d/%d, want 0/0", model.Signed16(wc), model.Signed16(mg))
+			}
+		})
+	}
+}
+
+// The restored tint counts as intended: a camera that will not take it fails the write.
+func TestASeededTintTheCameraKeepsIsReported(t *testing.T) {
+	cam, fake := setup(t)
+	fake.Live["film_simulation"] = model.FilmSimulation.Codes["acros"]
+	fake.Live["monochromatic.warm_cool"] = 30
+	fake.FieldHook = func(state map[string]int, f model.Field, target fakecam.Target, wire int, next func() uint16) uint16 {
+		if f.Key == "monochromatic.warm_cool" && !target.Live {
+			return fakecam.OK // acknowledged, not kept
+		}
+		return next()
+	}
+	_, err := cam.Write(recipe(t, `{"name": "COLOUR", "film_simulation": "classic_chrome"}`), slot(5), false)
+	e := wantKind(t, err, errs.InvalidRecipe)
+	if !strings.Contains(e.Message, "0xD193 wanted 0x0000, camera holds 0x001E") {
+		t.Fatal(e.Message)
+	}
+}

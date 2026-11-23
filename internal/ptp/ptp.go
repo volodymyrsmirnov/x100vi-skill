@@ -205,9 +205,14 @@ func (d DeviceInfo) Pack() []byte {
 
 // Session is a PTP session on top of a transport.
 type Session struct {
-	T         Transport
-	open      bool
-	described map[uint32]bool
+	T Transport
+	// ConversionMayBeRunning is set once a RAW conversion was (or may have been) started on this session
+	// and its result never arrived: the body may still be busy, and a second trigger was seen to hang it.
+	// Package rawconv refuses to start another conversion for the rest of the session, whichever
+	// camera.Camera or converter shares it.
+	ConversionMayBeRunning bool
+	open                   bool
+	described              map[uint32]bool
 }
 
 func NewSession(t Transport) *Session { return &Session{T: t, described: map[uint32]bool{}} }
@@ -216,9 +221,12 @@ func NewSession(t Transport) *Session { return &Session{T: t, described: map[uin
 // asking an X100VI for an object it has not described first (seen with handle 0, the settings file)
 // can hang the body until its battery is removed. A handle counts as described only once a reply to
 // GetObjectInfo parsed completely (ParseObjectInfo); it stops counting once it is deleted, once reading
-// its description fails, and whenever the session is opened or closed (handles belong to a session).
+// its description fails, and whenever the session is opened or closed (handles belong to a session),
+// however OpenSession or CloseSession is sent.
 func (s *Session) Transact(op uint16, params []uint32, dataOut []byte) (uint16, []uint32, []byte, error) {
 	switch op {
+	case OpOpenSession, OpCloseSession:
+		clear(s.described)
 	case OpGetObject:
 		if len(params) != 1 {
 			return 0, nil, nil, errs.New(errs.General,
