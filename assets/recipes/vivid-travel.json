@@ -1,0 +1,29 @@
+{
+  "$schema": "https://raw.githubusercontent.com/volodymyrsmirnov/x100vi-skill/main/assets/recipe.schema.json",
+  "source": "x100vi-skill starter recipe (original; not an emulation of any film stock)",
+  "name": "VIVID TRAVEL",
+  "description": "Saturated postcard colour with strong blues and greens. For landscapes, architecture and markets.",
+  "tags": [
+    "travel",
+    "landscape",
+    "architecture",
+    "vivid",
+    "saturated",
+    "daylight"
+  ],
+  "notes": "Exposure compensation 0. Watch saturated reds; lower color to 0 if they clip.",
+  "film_simulation": "velvia",
+  "dynamic_range": "200",
+  "color_chrome_effect": "strong",
+  "color_chrome_fx_blue": "strong",
+  "white_balance": {
+    "mode": "auto",
+    "shift_r": 0,
+    "shift_b": 0
+  },
+  "highlight": -1,
+  "shadow": 0,
+  "color": 1,
+  "sharpness": 1,
+  "noise_reduction": -3
+}

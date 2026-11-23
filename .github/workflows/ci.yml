@@ -1,5 +1,9 @@
 name: CI
 
+# Pull requests: test on every platform and build every binary.
+# Pushes to main: the same, then publish a GitHub release with the binaries. The skill's launcher
+# downloads them from the latest release.
+
 on:
   push:
     branches: [main]
@@ -8,30 +12,183 @@ on:
 permissions:
   contents: read
 
+# A newer push to a pull request cancels the run it supersedes. Every push to main gets a group of its
+# own (keyed by its commit), so no push to main is ever cancelled or dropped as a pending duplicate.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
-    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    name: test / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python: ["3.10", "3.13"]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-go@v5
         with:
-          python-version: ${{ matrix.python }}
-      - run: uv sync
-      - run: uv run ruff check
-      - run: uv run pytest
-      - name: Build the package and check the skill ships inside it
-        shell: bash
+          go-version-file: go.mod
+      - name: gofmt
+        if: runner.os != 'Windows'
+        run: test -z "$(gofmt -l . | tee /dev/stderr)"
+      - run: go vet ./...
+      - run: go test ./...
+      - name: Cross-compile every other target
+        if: runner.os == 'Linux' && runner.arch == 'X64'
         run: |
-          uv build
-          uv run python - <<'PY'
-          import glob, zipfile
-          names = zipfile.ZipFile(glob.glob("dist/*.whl")[0]).namelist()
-          assert "x100vi/_skill/SKILL.md" in names, names
-          assert any(n.startswith("x100vi/recipes/") for n in names)
-          PY
+          GOOS=windows GOARCH=amd64 go vet ./...
+          GOOS=linux GOARCH=arm64 go vet ./...
+
+  build:
+    name: build / ${{ matrix.name }}
+    needs: test
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { name: linux-amd64, runner: ubuntu-latest, goos: linux, goarch: amd64, file: x100vi-linux-amd64 }
+          - { name: linux-arm64, runner: ubuntu-latest, goos: linux, goarch: arm64, file: x100vi-linux-arm64 }
+          - { name: windows-amd64, runner: ubuntu-latest, goos: windows, goarch: amd64, file: x100vi-windows-amd64.exe }
+          - { name: darwin-universal, runner: macos-latest, goos: darwin, goarch: universal, file: x100vi-darwin-universal }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Version
+        id: version
+        shell: bash
+        run: echo "version=0.2.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+      - name: Build (pure Go)
+        if: matrix.goos != 'darwin'
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w -X main.version=${{ steps.version.outputs.version }}" \
+            -o "dist/${{ matrix.file }}" ./cmd/x100vi
+      - name: Build (macOS universal, cgo for ImageCaptureCore)
+        if: matrix.goos == 'darwin'
+        env:
+          CGO_ENABLED: "1"
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: |
+          mkdir -p dist
+          for arch in arm64 amd64; do
+            GOARCH=$arch go build -trimpath -ldflags "-s -w -X main.version=${{ steps.version.outputs.version }}" \
+              -o "dist/x100vi-darwin-$arch" ./cmd/x100vi
+          done
+          lipo -create -output "dist/${{ matrix.file }}" dist/x100vi-darwin-arm64 dist/x100vi-darwin-amd64
+          rm dist/x100vi-darwin-arm64 dist/x100vi-darwin-amd64
+          codesign --force --sign - "dist/${{ matrix.file }}"
+          lipo -info "dist/${{ matrix.file }}"
+          "dist/${{ matrix.file }}" --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.file }}
+          path: dist/${{ matrix.file }}
+          if-no-files-found: error
+
+  release:
+    name: release
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: |
+          chmod +x x100vi-*
+          sha256sum x100vi-* > SHA256SUMS
+          cat SHA256SUMS
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: 0.2.${{ github.run_number }}
+        run: |
+          # Every push keeps its own release; the promote job below decides which one is "latest".
+          gh release create "v$VERSION" dist/* \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "x100vi $VERSION" \
+            --generate-notes \
+            --latest=false
+
+  # Marks the newest good release as "latest". Every push to main publishes v0.2.<run number> only after
+  # its tests and builds pass, and run numbers follow push order, so the published v0.2.N with the
+  # highest N is the newest good build. Picking it from the release list (rather than the release of
+  # main's current head) still promotes the previous good release when the newest push fails CI. Runs one
+  # at a time (never cancelled mid-way) and only ever moves "latest" forward, so an older run finishing
+  # last cannot take "latest" from a newer release.
+  promote:
+    name: promote latest
+    needs: release
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: promote-latest
+      cancel-in-progress: false
+    steps:
+      - name: Mark the newest published release as latest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Published (not draft), non-prerelease releases. A failing API call fails the job instead of
+          # looking like "no release yet".
+          tags=$(gh api --paginate "repos/$REPO/releases" \
+            --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name')
+          best="" best_n=-1
+          while IFS= read -r tag; do
+            if [[ "$tag" =~ ^v0\.2\.([0-9]+)$ ]]; then
+              n=$((10#${BASH_REMATCH[1]}))
+              if (( n > best_n )); then best="$tag" best_n=$n; fi
+            fi
+          done <<< "$tags"
+          if [ -z "$best" ]; then
+            echo "No published v0.2.N release yet; nothing to promote."
+            exit 0
+          fi
+
+          # The current latest, if any. Only "no latest release" (404) is expected; anything else fails.
+          errfile="$RUNNER_TEMP/latest.err"
+          if latest=$(gh api "repos/$REPO/releases/latest" --jq .tag_name 2>"$errfile"); then
+            :
+          elif grep -q "HTTP 404" "$errfile"; then
+            latest=""
+          else
+            cat "$errfile" >&2
+            exit 1
+          fi
+
+          # Only move forward: compare run numbers, or whole versions for a tag of another series.
+          if [ -n "$latest" ]; then
+            newer=0
+            if [[ "$latest" =~ ^v0\.2\.([0-9]+)$ ]]; then
+              if (( best_n > 10#${BASH_REMATCH[1]} )); then newer=1; fi
+            elif [ "$(printf '%s\n%s\n' "$latest" "$best" | sort -V | tail -n 1)" = "$best" ]; then
+              newer=1
+            fi
+            if [ "$newer" != 1 ]; then
+              echo "The latest release is $latest; $best is not newer, nothing to do."
+              exit 0
+            fi
+          fi
+          echo "Marking $best as the latest release (was: ${latest:-none})."
+          gh release edit "$best" --repo "$REPO" --latest

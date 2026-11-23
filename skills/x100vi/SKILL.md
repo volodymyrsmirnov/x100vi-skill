@@ -27,13 +27,12 @@ sh "<this skill's folder>/scripts/x100vi.sh" doctor --json
 
 On Windows: `powershell -ExecutionPolicy Bypass -File "<this skill's folder>\scripts\x100vi.ps1" doctor --json`.
 
-The launcher uses `x100vi` if it is already installed. If not, it installs the tool once with `uv`
-(or `pipx`) and then runs the command, so the first call can take a minute: tell the user it is
-installing. Install messages go to stderr; stdout stays clean JSON. **Everywhere below, `x100vi` means
-this launcher.**
+The first call downloads the tool (one small binary from the project's latest GitHub release, checksum
+verified) into a cache folder; later calls reuse it. Download messages go to stderr; stdout stays clean
+JSON. **Everywhere below, `x100vi` means this launcher.**
 
-- If the launcher exits 127, neither `uv` nor `pipx` is available. Relay its hint and ask the user before
-  installing `uv` for them.
+- If the launcher exits 127, the download failed (no network, or no release for this system). Relay its
+  error and hint.
 - If a command or option described here is reported as unknown, the installed tool is older than this
   skill: run the launcher with `--self-update`, then retry.
 
@@ -145,7 +144,9 @@ another body; `--other-body` overrides only the last check and needs the user's 
 - **Never pass `--overwrite`, `restore --yes` or `--other-body` on your own judgment.** They replace the
   user's saved looks or settings.
 - Do not invent settings. The camera accepts only what the schema lists; `validate` is the authority.
-- One program at a time: `x100vi` cannot share the camera with X RAW STUDIO, Image Capture or Lightroom.
+- One `x100vi` command at a time: a second one waits for the first (or fails with `camera_busy`). While an
+  `x100vi` command runs, do not use other camera programs (X RAW Studio, X Acquire, Lightroom, Capture One,
+  Image Capture imports): another program's images could be mistaken for a preview.
 - RAF files must come from an X100VI. JPEGs cannot be previewed.
 - If `preview` reports a conversion timeout, do not run it again. Tell the user to switch the camera off
   and on first.
@@ -167,7 +168,8 @@ and exit non-zero; the `hint` is written for the user, so pass it on.
 | 10 | `camera_not_found` | no camera on USB |
 | 11 | `wrong_usb_mode` | camera is not in USB RAW CONV./BACKUP RESTORE |
 | 12 | `unsupported_camera` | not an X100VI |
-| 13 | `camera_busy` | another program holds the camera |
+| 13 | `camera_busy` | another program, or another `x100vi` command, holds the camera |
 | 14 | `sandboxed` | the command ran inside a sandbox, where USB is hidden; rerun it outside |
+| 15 | `camera_not_responding` | the camera stopped answering; ask the user to switch it off and on (or remove the battery) before anything else |
 | 20 | `conversion_failed` | the RAF could not be developed |
 | 30 | `camera_refused` | the camera rejected a request |

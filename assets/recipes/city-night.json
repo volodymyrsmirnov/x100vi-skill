@@ -1,0 +1,34 @@
+{
+  "$schema": "https://raw.githubusercontent.com/volodymyrsmirnov/x100vi-skill/main/assets/recipe.schema.json",
+  "source": "x100vi-skill starter recipe (original; not an emulation of any film stock)",
+  "name": "CITY NIGHT",
+  "description": "Cool, cinematic streets after dark: teal shadows, neon that holds its colour, visible grain.",
+  "tags": [
+    "night",
+    "city",
+    "street",
+    "neon",
+    "cinematic",
+    "cool"
+  ],
+  "notes": "Exposure compensation -1/3 to -2/3 to keep the night dark. ISO auto up to 6400.",
+  "film_simulation": "classic_neg",
+  "dynamic_range": "200",
+  "grain": {
+    "strength": "strong",
+    "size": "small"
+  },
+  "color_chrome_effect": "strong",
+  "color_chrome_fx_blue": "weak",
+  "white_balance": {
+    "mode": "kelvin",
+    "kelvin": 4200,
+    "shift_r": -1,
+    "shift_b": 2
+  },
+  "highlight": 0,
+  "shadow": 2,
+  "color": 1,
+  "sharpness": -1,
+  "noise_reduction": -2
+}

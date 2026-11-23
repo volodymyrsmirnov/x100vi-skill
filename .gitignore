@@ -1,12 +1,9 @@
-.venv/
-__pycache__/
-*.pyc
-dist/
-build/
-*.egg-info/
-.pytest_cache/
-.ruff_cache/
+/x100vi
+/x100vi.exe
+/dist/
 previews/
+x100vi-previews/
 *.RAF
 *.raf
 .DS_Store
+.review-inputs/

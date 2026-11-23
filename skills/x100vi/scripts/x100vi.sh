@@ -1,75 +1,96 @@
 #!/bin/sh
-# Runs the x100vi tool, installing it on first use.
+# Runs the x100vi tool, downloading it on first use.
 #
 #   sh x100vi.sh doctor --json      run any x100vi command
-#   sh x100vi.sh --self-update      reinstall the latest version of the tool
+#   sh x100vi.sh --self-update      download the latest release again
 #
-# The tool is taken from PATH when it is already installed. Otherwise it is installed once
-# with uv (or pipx). Set X100VI_SOURCE to install from somewhere else, e.g. a local checkout.
+# The tool is one binary per platform, published on every GitHub release. It is downloaded once
+# (checksum verified) into a cache folder and reused. Environment:
+#   X100VI_BIN          use this binary instead (e.g. one you built yourself)
+#   X100VI_RELEASE_URL  download from here instead of the latest GitHub release
+#   X100VI_CACHE        cache folder (default: ~/Library/Caches/x100vi or ~/.cache/x100vi)
 set -eu
 
-SOURCE="${X100VI_SOURCE:-git+https://github.com/volodymyrsmirnov/x100vi-skill}"
+RELEASE_URL="${X100VI_RELEASE_URL:-https://github.com/volodymyrsmirnov/x100vi-skill/releases/latest/download}"
 
-find_tool() {
-    if command -v x100vi >/dev/null 2>&1; then
-        command -v x100vi
-        return 0
-    fi
-    if command -v uv >/dev/null 2>&1; then
-        bin_dir=$(uv tool dir --bin 2>/dev/null || true)
-        if [ -n "$bin_dir" ] && [ -x "$bin_dir/x100vi" ]; then
-            printf '%s\n' "$bin_dir/x100vi"
-            return 0
-        fi
-    fi
-    if [ -x "$HOME/.local/bin/x100vi" ]; then
-        printf '%s\n' "$HOME/.local/bin/x100vi"
-        return 0
-    fi
-    return 1
+if [ -n "${X100VI_BIN:-}" ]; then
+    exec "$X100VI_BIN" "$@"
+fi
+
+case "$(uname -s)" in
+    Darwin) asset="x100vi-darwin-universal"; default_cache="$HOME/Library/Caches/x100vi" ;;
+    Linux)
+        case "$(uname -m)" in
+            x86_64|amd64) asset="x100vi-linux-amd64" ;;
+            aarch64|arm64) asset="x100vi-linux-arm64" ;;
+            *) echo "error: no x100vi build for $(uname -m) Linux" >&2; exit 127 ;;
+        esac
+        default_cache="${XDG_CACHE_HOME:-$HOME/.cache}/x100vi" ;;
+    MINGW*|MSYS*|CYGWIN*) asset="x100vi-windows-amd64.exe"; default_cache="${LOCALAPPDATA:-$HOME}/x100vi" ;;
+    *) echo "error: no x100vi build for $(uname -s)" >&2; exit 127 ;;
+esac
+cache="${X100VI_CACHE:-$default_cache}"
+tool="$cache/$asset"
+
+sandboxed() {
+    [ -n "${CODEX_SANDBOX:-}" ] || [ "${CODEX_SANDBOX_NETWORK_DISABLED:-}" = "1" ] || [ -n "${X100VI_SANDBOX:-}" ]
 }
 
-install_tool() {
-    # $1 is "fresh" or "update". Installer output goes to stderr so stdout stays clean for --json.
-    if [ -n "${CODEX_SANDBOX:-}" ] || [ "${CODEX_SANDBOX_NETWORK_DISABLED:-}" = "1" ] || [ -n "${X100VI_SANDBOX:-}" ]; then
+fetch() {
+    # fetch URL FILE. Progress and errors go to stderr so stdout stays clean for --json.
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --retry 2 -o "$2" "$1"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q -O "$2" "$1"
+    else
+        echo "error: neither curl nor wget is available to download the x100vi tool" >&2
+        exit 127
+    fi
+}
+
+sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | cut -d' ' -f1
+    else
+        shasum -a 256 "$1" | cut -d' ' -f1
+    fi
+}
+
+download() {
+    if sandboxed; then
         # echo, not a here-document: the shell needs a temp file for those, which a sandbox denies
-        echo "error: the x100vi tool is not installed yet and cannot be installed from inside the sandbox (no network there)" >&2
+        echo "error: the x100vi tool is not downloaded yet and cannot be downloaded from inside the sandbox (no network there)" >&2
         echo "hint: Run this same command again outside the sandbox (ask for approval to run it unsandboxed). The camera also needs that: USB is not reachable from a sandbox." >&2
         exit 14
     fi
-    if command -v uv >/dev/null 2>&1; then
-        echo "x100vi: installing the x100vi tool with uv from $SOURCE ..." >&2
-        if [ "$1" = "update" ]; then
-            uv tool install --force --reinstall "$SOURCE" >&2
-        else
-            uv tool install "$SOURCE" >&2
-        fi
-    elif command -v pipx >/dev/null 2>&1; then
-        echo "x100vi: installing the x100vi tool with pipx from $SOURCE ..." >&2
-        if [ "$1" = "update" ]; then
-            pipx install --force "$SOURCE" >&2
-        else
-            pipx install "$SOURCE" >&2
-        fi
-    else
-        echo "error: the x100vi tool is not installed, and neither uv nor pipx is available to install it" >&2
-        echo "hint: Install uv from https://docs.astral.sh/uv/getting-started/installation/ and run this again, or install the tool yourself: pipx install $SOURCE" >&2
+    mkdir -p "$cache"
+    echo "x100vi: downloading $asset from $RELEASE_URL ..." >&2
+    tmp="$tool.download.$$"
+    sums="$cache/SHA256SUMS.$$"
+    trap 'rm -f "$tmp" "$sums"' EXIT INT TERM
+    if ! fetch "$RELEASE_URL/$asset" "$tmp" || ! fetch "$RELEASE_URL/SHA256SUMS" "$sums"; then
+        echo "error: could not download the x100vi tool from $RELEASE_URL" >&2
+        echo "hint: Check the network connection and try again, or download $asset from https://github.com/volodymyrsmirnov/x100vi-skill/releases and set X100VI_BIN to its path." >&2
         exit 127
     fi
+    want=$(grep " $asset\$" "$sums" | cut -d' ' -f1 | head -n 1)
+    got=$(sha256 "$tmp")
+    if [ -z "$want" ] || [ "$want" != "$got" ]; then
+        echo "error: the downloaded $asset does not match the release checksum; it was not installed" >&2
+        exit 127
+    fi
+    chmod +x "$tmp"
+    mv -f "$tmp" "$tool"
+    rm -f "$sums"
+    trap - EXIT INT TERM
 }
 
 if [ "${1:-}" = "--self-update" ]; then
-    install_tool update
-    tool=$(find_tool) || { echo "error: the tool was installed but cannot be found on this system" >&2; exit 127; }
+    download
     exec "$tool" --version
 fi
 
-if ! tool=$(find_tool); then
-    install_tool fresh
-    tool=$(find_tool) || {
-        echo "error: the tool was installed but cannot be found" >&2
-        echo "hint: add uv's tool folder to PATH with: uv tool update-shell" >&2
-        exit 127
-    }
+if [ ! -x "$tool" ]; then
+    download
 fi
 exec "$tool" "$@"
