@@ -27,13 +27,12 @@ sh "<this skill's folder>/scripts/x100vi.sh" doctor --json
 
 On Windows: `powershell -ExecutionPolicy Bypass -File "<this skill's folder>\scripts\x100vi.ps1" doctor --json`.
 
-The launcher uses `x100vi` if it is already installed. If not, it installs the tool once with `uv`
-(or `pipx`) and then runs the command, so the first call can take a minute: tell the user it is
-installing. Install messages go to stderr; stdout stays clean JSON. **Everywhere below, `x100vi` means
-this launcher.**
+The first call downloads the tool (one small binary from the project's latest GitHub release, checksum
+verified) into a cache folder; later calls reuse it. Download messages go to stderr; stdout stays clean
+JSON. **Everywhere below, `x100vi` means this launcher.**
 
-- If the launcher exits 127, neither `uv` nor `pipx` is available. Relay its hint and ask the user before
-  installing `uv` for them.
+- If the launcher exits 127, the download failed (no network, or no release for this system). Relay its
+  error and hint.
 - If a command or option described here is reported as unknown, the installed tool is older than this
   skill: run the launcher with `--self-update`, then retry.
 

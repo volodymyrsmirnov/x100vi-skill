@@ -51,8 +51,8 @@ you to set on the body.
 
 - A Fujifilm **X100VI** (tested on firmware 1.31) and a USB-C **data** cable.
 - The camera's CONNECTION MODE set to **USB RAW CONV./BACKUP RESTORE** ([how](#3-set-up-the-camera-required)).
-- [uv](https://docs.astral.sh/uv/) (or pipx with Python 3.10 or newer) to install and run the tool.
-- Node.js 22.20 or later, only if you install the skill with `npx skills`.
+- Node.js 22.20 or later, only to install the skill with `npx skills`. The tool itself is a single
+  binary with no other requirements.
 - macOS (tested). Windows and Linux should work; see [Platforms](#platforms).
 - Optional: [exiftool](https://exiftool.org), only for `x100vi verify` and `preview --verify`.
 
@@ -75,9 +75,10 @@ npx skills add volodymyrsmirnov/x100vi-skill -g -a claude-code -a codex -y
 `-g` makes the skill available in every project; leave it out to install into the current project only.
 Start a new agent session afterwards.
 
-**That is all you need.** The skill carries a small launcher that installs the `x100vi` tool by itself the
-first time the agent uses it. That step needs [uv](https://docs.astral.sh/uv/getting-started/installation/)
-(or pipx) on your machine; if neither is there, the agent tells you what to install.
+**That is all you need.** The skill carries a small launcher that downloads the `x100vi` binary for your
+system from the [latest release](https://github.com/volodymyrsmirnov/x100vi-skill/releases/latest) the
+first time the agent uses it, checks it against the release's checksums, and keeps it in a cache folder.
+`sh x100vi.sh --self-update` (or asking the agent to update the tool) fetches the newest release.
 
 Other ways to get the skill:
 
@@ -88,18 +89,28 @@ Other ways to get the skill:
 
 ### 2. The command-line tool (optional)
 
-Install it yourself if you want to use `x100vi` from a terminal, or prefer not to let the skill install it:
+To use `x100vi` from a terminal, download the binary for your system from the
+[latest release](https://github.com/volodymyrsmirnov/x100vi-skill/releases/latest) and put it on your
+PATH as `x100vi` (`x100vi.exe` on Windows):
+
+| System | File |
+|---|---|
+| macOS (Apple silicon and Intel) | `x100vi-darwin-universal` |
+| Linux x64 / arm64 | `x100vi-linux-amd64` / `x100vi-linux-arm64` |
+| Windows x64 | `x100vi-windows-amd64.exe` |
+
+For example on macOS:
 
 ```bash
-uv tool install git+https://github.com/volodymyrsmirnov/x100vi-skill
+curl -fL -o /usr/local/bin/x100vi https://github.com/volodymyrsmirnov/x100vi-skill/releases/latest/download/x100vi-darwin-universal
 ```
 
 ```bash
-x100vi --version
+chmod +x /usr/local/bin/x100vi && x100vi --version
 ```
 
-With pipx instead: `pipx install git+https://github.com/volodymyrsmirnov/x100vi-skill`. The skill uses an
-installed `x100vi` when it finds one. To update later: `uv tool upgrade x100vi`.
+A file downloaded with a web browser instead is quarantined by macOS; clear that with
+`xattr -d com.apple.quarantine /usr/local/bin/x100vi`. Every push to `main` publishes a new release.
 
 ### 3. Set up the camera (required)
 
@@ -291,33 +302,34 @@ camera apps first.
 
 ## Development
 
+Needs Go (the version in `go.mod`); on macOS also the Xcode command-line tools, for the
+ImageCaptureCore bridge.
+
 ```bash
 git clone https://github.com/volodymyrsmirnov/x100vi-skill
 cd x100vi-skill
-uv sync
-uv run pytest          # about 180 tests against a software camera; no hardware needed
-uv run ruff check
+go test ./...          # tests against a software camera; no hardware needed
+go build -o x100vi ./cmd/x100vi
 ```
 
 Tests against a real camera are opt-in and restore what they change:
 
 ```bash
-X100VI_HARDWARE=1 X100VI_TEST_RAF=/path/to/shot.RAF uv run pytest tests/hardware -v
+X100VI_HARDWARE=1 X100VI_TEST_RAF=/path/to/shot.RAF go test ./internal/hardware -v
 ```
 
-To try the skill from a checkout, install the tool from it first so the skill's launcher finds it, then
-install the skill from the local folder:
+To try the skill from a checkout, point its launcher at your build, then install the skill from the local
+folder:
 
 ```bash
-uv tool install --editable .
+export X100VI_BIN="$PWD/x100vi"
 ```
 
 ```bash
 npx skills add ./ -g -a claude-code -a codex -y
 ```
 
-`claude --plugin-dir .` loads it as a plugin for one Claude Code session instead. The launcher's install
-source can be pointed at a checkout with `X100VI_SOURCE=/path/to/x100vi-skill`.
+`claude --plugin-dir .` loads it as a plugin for one Claude Code session instead.
 
 How the camera is addressed, the measured property map and the evidence behind each value are in
 [docs/protocol.md](docs/protocol.md). Contributor notes: [AGENTS.md](AGENTS.md).

@@ -1,63 +1,65 @@
-# Runs the x100vi tool on Windows, installing it on first use.
+# Runs the x100vi tool on Windows, downloading it on first use.
 #
 #   powershell -ExecutionPolicy Bypass -File x100vi.ps1 doctor --json
 #   powershell -ExecutionPolicy Bypass -File x100vi.ps1 --self-update
 #
-# The tool is taken from PATH when it is already installed. Otherwise it is installed once
-# with uv (or pipx). Set X100VI_SOURCE to install from somewhere else, e.g. a local checkout.
+# The tool is one binary per platform, published on every GitHub release. It is downloaded once
+# (checksum verified) into %LOCALAPPDATA%\x100vi and reused. Environment:
+#   X100VI_BIN          use this binary instead (e.g. one you built yourself)
+#   X100VI_RELEASE_URL  download from here instead of the latest GitHub release
+#   X100VI_CACHE        cache folder
 $ErrorActionPreference = "Stop"
-$Source = if ($env:X100VI_SOURCE) { $env:X100VI_SOURCE } else { "git+https://github.com/volodymyrsmirnov/x100vi-skill" }
+$ProgressPreference = "SilentlyContinue"
 
-function Find-Tool {
-    $cmd = Get-Command x100vi -ErrorAction SilentlyContinue
-    if ($cmd) { return $cmd.Source }
-    if (Get-Command uv -ErrorAction SilentlyContinue) {
-        $bin = (& uv tool dir --bin 2>$null)
-        if ($bin) {
-            $candidate = Join-Path $bin "x100vi.exe"
-            if (Test-Path $candidate) { return $candidate }
-        }
-    }
-    return $null
-}
-
-function Install-Tool([bool]$Update) {
-    # Installer output goes to the error stream so standard output stays clean for --json.
-    if ($env:CODEX_SANDBOX -or $env:CODEX_SANDBOX_NETWORK_DISABLED -eq "1" -or $env:X100VI_SANDBOX) {
-        [Console]::Error.WriteLine("error: the x100vi tool is not installed yet and cannot be installed from inside the sandbox (no network there)")
-        [Console]::Error.WriteLine("hint: Run this same command again outside the sandbox (ask for approval to run it unsandboxed). The camera also needs that: USB is not reachable from a sandbox.")
-        exit 14
-    }
-    if (Get-Command uv -ErrorAction SilentlyContinue) {
-        [Console]::Error.WriteLine("x100vi: installing the x100vi tool with uv from $Source ...")
-        if ($Update) { & uv tool install --force --reinstall $Source 1>&2 } else { & uv tool install $Source 1>&2 }
-    } elseif (Get-Command pipx -ErrorAction SilentlyContinue) {
-        [Console]::Error.WriteLine("x100vi: installing the x100vi tool with pipx from $Source ...")
-        if ($Update) { & pipx install --force $Source 1>&2 } else { & pipx install $Source 1>&2 }
-    } else {
-        [Console]::Error.WriteLine("error: the x100vi tool is not installed, and neither uv nor pipx is available to install it")
-        [Console]::Error.WriteLine("hint: Install uv from https://docs.astral.sh/uv/getting-started/installation/ and run this again, or install the tool yourself: pipx install $Source")
-        exit 127
-    }
-}
-
-if ($args.Count -gt 0 -and $args[0] -eq "--self-update") {
-    Install-Tool $true
-    $tool = Find-Tool
-    if (-not $tool) { [Console]::Error.WriteLine("error: the tool was installed but cannot be found"); exit 127 }
-    & $tool --version
+if ($env:X100VI_BIN) {
+    & $env:X100VI_BIN @args
     exit $LASTEXITCODE
 }
 
-$tool = Find-Tool
-if (-not $tool) {
-    Install-Tool $false
-    $tool = Find-Tool
-    if (-not $tool) {
-        [Console]::Error.WriteLine("error: the tool was installed but cannot be found")
-        [Console]::Error.WriteLine("hint: add uv's tool folder to PATH with: uv tool update-shell")
+$ReleaseUrl = if ($env:X100VI_RELEASE_URL) { $env:X100VI_RELEASE_URL } else { "https://github.com/volodymyrsmirnov/x100vi-skill/releases/latest/download" }
+$Asset = "x100vi-windows-amd64.exe"
+$Cache = if ($env:X100VI_CACHE) { $env:X100VI_CACHE } elseif ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA "x100vi" } else { Join-Path $HOME ".x100vi" }
+$Tool = Join-Path $Cache $Asset
+
+function Download-Tool {
+    # Progress goes to the error stream so standard output stays clean for --json.
+    if ($env:CODEX_SANDBOX -or $env:CODEX_SANDBOX_NETWORK_DISABLED -eq "1" -or $env:X100VI_SANDBOX) {
+        [Console]::Error.WriteLine("error: the x100vi tool is not downloaded yet and cannot be downloaded from inside the sandbox (no network there)")
+        [Console]::Error.WriteLine("hint: Run this same command again outside the sandbox (ask for approval to run it unsandboxed). The camera also needs that: USB is not reachable from a sandbox.")
+        exit 14
+    }
+    New-Item -ItemType Directory -Force -Path $Cache | Out-Null
+    [Console]::Error.WriteLine("x100vi: downloading $Asset from $ReleaseUrl ...")
+    $tmp = "$Tool.download"
+    $sums = Join-Path $Cache "SHA256SUMS"
+    try {
+        Invoke-WebRequest -UseBasicParsing -Uri "$ReleaseUrl/$Asset" -OutFile $tmp
+        Invoke-WebRequest -UseBasicParsing -Uri "$ReleaseUrl/SHA256SUMS" -OutFile $sums
+    } catch {
+        [Console]::Error.WriteLine("error: could not download the x100vi tool from $ReleaseUrl ($($_.Exception.Message))")
+        [Console]::Error.WriteLine("hint: Check the network connection and try again, or download $Asset from https://github.com/volodymyrsmirnov/x100vi-skill/releases and set X100VI_BIN to its path.")
         exit 127
     }
+    $line = Get-Content $sums | Where-Object { $_ -match "\s\*?$([regex]::Escape($Asset))$" } | Select-Object -First 1
+    $want = if ($line) { ($line -split '\s+')[0].ToLower() } else { "" }
+    $got = (Get-FileHash -Algorithm SHA256 $tmp).Hash.ToLower()
+    Remove-Item -Force $sums
+    if (-not $want -or $want -ne $got) {
+        Remove-Item -Force $tmp
+        [Console]::Error.WriteLine("error: the downloaded $Asset does not match the release checksum; it was not installed")
+        exit 127
+    }
+    Move-Item -Force $tmp $Tool
 }
-& $tool @args
+
+if ($args.Count -gt 0 -and $args[0] -eq "--self-update") {
+    Download-Tool
+    & $Tool --version
+    exit $LASTEXITCODE
+}
+
+if (-not (Test-Path $Tool)) {
+    Download-Tool
+}
+& $Tool @args
 exit $LASTEXITCODE

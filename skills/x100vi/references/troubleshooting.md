@@ -34,17 +34,18 @@ are invisible there, and so is the network.
 
 ## The tool will not install or run
 
-The skill runs the tool through `scripts/x100vi.sh` (Windows: `scripts/x100vi.ps1`), which installs it on
-first use.
+The skill runs the tool through `scripts/x100vi.sh` (Windows: `scripts/x100vi.ps1`), which downloads the
+binary for this system from the latest GitHub release on first use and caches it (macOS
+`~/Library/Caches/x100vi`, Linux `~/.cache/x100vi`, Windows `%LOCALAPPDATA%\x100vi`).
 
-- **Exit 127, "neither uv nor pipx is available"**: install uv from
-  https://docs.astral.sh/uv/getting-started/installation/ and run the command again.
-- **The install itself fails** (no network, no git): the installer's own error is shown. Fix that, or
-  install by hand: `uv tool install git+https://github.com/volodymyrsmirnov/x100vi-skill`.
-- **"installed but cannot be found"**: uv's tool folder is not on PATH; `uv tool update-shell` adds it.
-- **A command or option is unknown**: the installed tool is older than the skill. Run the launcher with
+- **Exit 127, "could not download"**: no network, or GitHub unreachable. Try again later, or download the
+  binary from https://github.com/volodymyrsmirnov/x100vi-skill/releases and set `X100VI_BIN` to its path.
+- **"does not match the release checksum"**: the download was damaged or tampered with; nothing was
+  installed. Run the command again.
+- **A command or option is unknown**: the cached tool is older than the skill. Run the launcher with
   `--self-update`.
-- `X100VI_SOURCE` overrides where the launcher installs from (a path to a checkout, or another git URL).
+- `X100VI_BIN` runs a specific binary (e.g. one built from a checkout); `X100VI_RELEASE_URL` downloads from
+  somewhere else.
 
 ## Preview problems
 

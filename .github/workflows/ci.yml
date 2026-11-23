@@ -1,5 +1,9 @@
 name: CI
 
+# Pull requests: test on every platform and build every binary.
+# Pushes to main: the same, then publish a GitHub release with the binaries. The skill's launcher
+# downloads them from the latest release.
+
 on:
   push:
     branches: [main]
@@ -8,30 +12,113 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
-    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    name: test / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python: ["3.10", "3.13"]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-go@v5
         with:
-          python-version: ${{ matrix.python }}
-      - run: uv sync
-      - run: uv run ruff check
-      - run: uv run pytest
-      - name: Build the package and check the skill ships inside it
-        shell: bash
+          go-version-file: go.mod
+      - name: gofmt
+        if: runner.os != 'Windows'
+        run: test -z "$(gofmt -l . | tee /dev/stderr)"
+      - run: go vet ./...
+      - run: go test ./...
+      - name: Cross-compile every other target
+        if: runner.os == 'Linux' && runner.arch == 'X64'
         run: |
-          uv build
-          uv run python - <<'PY'
-          import glob, zipfile
-          names = zipfile.ZipFile(glob.glob("dist/*.whl")[0]).namelist()
-          assert "x100vi/_skill/SKILL.md" in names, names
-          assert any(n.startswith("x100vi/recipes/") for n in names)
-          PY
+          GOOS=windows GOARCH=amd64 go vet ./...
+          GOOS=linux GOARCH=arm64 go vet ./...
+
+  build:
+    name: build / ${{ matrix.name }}
+    needs: test
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { name: linux-amd64, runner: ubuntu-latest, goos: linux, goarch: amd64, file: x100vi-linux-amd64 }
+          - { name: linux-arm64, runner: ubuntu-latest, goos: linux, goarch: arm64, file: x100vi-linux-arm64 }
+          - { name: windows-amd64, runner: ubuntu-latest, goos: windows, goarch: amd64, file: x100vi-windows-amd64.exe }
+          - { name: darwin-universal, runner: macos-latest, goos: darwin, goarch: universal, file: x100vi-darwin-universal }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Version
+        id: version
+        shell: bash
+        run: echo "version=0.2.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+      - name: Build (pure Go)
+        if: matrix.goos != 'darwin'
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w -X main.version=${{ steps.version.outputs.version }}" \
+            -o "dist/${{ matrix.file }}" ./cmd/x100vi
+      - name: Build (macOS universal, cgo for ImageCaptureCore)
+        if: matrix.goos == 'darwin'
+        env:
+          CGO_ENABLED: "1"
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: |
+          mkdir -p dist
+          for arch in arm64 amd64; do
+            GOARCH=$arch go build -trimpath -ldflags "-s -w -X main.version=${{ steps.version.outputs.version }}" \
+              -o "dist/x100vi-darwin-$arch" ./cmd/x100vi
+          done
+          lipo -create -output "dist/${{ matrix.file }}" dist/x100vi-darwin-arm64 dist/x100vi-darwin-amd64
+          rm dist/x100vi-darwin-arm64 dist/x100vi-darwin-amd64
+          codesign --force --sign - "dist/${{ matrix.file }}"
+          lipo -info "dist/${{ matrix.file }}"
+          "dist/${{ matrix.file }}" --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.file }}
+          path: dist/${{ matrix.file }}
+          if-no-files-found: error
+
+  release:
+    name: release
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: |
+          chmod +x x100vi-*
+          sha256sum x100vi-* > SHA256SUMS
+          cat SHA256SUMS
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: 0.2.${{ github.run_number }}
+        run: |
+          gh release create "v$VERSION" dist/* \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "x100vi $VERSION" \
+            --generate-notes \
+            --latest
